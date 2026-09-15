@@ -146,14 +146,19 @@ if [[ "${OPTIMIZED}" == "1" ]]; then
         --linear-attn-prefill-backend flashinfer
         --linear-attn-decode-backend flashinfer
         --linear-attn-verify-backend triton
-        --speculative-algorithm NEXTN
-        --speculative-num-steps 3
-        --speculative-eagle-topk 1
-        --speculative-num-draft-tokens 4
         --tokenizer-worker-num 6
     )
+    # Qwen3.8 QSA draft-prefill currently triggers CUDA illegal-address
+    # failures in the MTP/EAGLE path. Keep NEXTN only on decode workers;
+    # prefill remains on the stable non-speculative path.
     if [[ "${ROLE}" == "decode" ]]; then
-        args+=(--max-running-requests "${QWEN38_PD_MAX_RUNNING_REQUESTS:-96}")
+        args+=(
+            --speculative-algorithm NEXTN
+            --speculative-num-steps 3
+            --speculative-eagle-topk 1
+            --speculative-num-draft-tokens 4
+            --max-running-requests "${QWEN38_PD_MAX_RUNNING_REQUESTS:-96}"
+        )
     fi
 fi
 

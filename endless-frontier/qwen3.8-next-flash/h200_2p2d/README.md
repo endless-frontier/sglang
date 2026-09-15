@@ -27,7 +27,7 @@ bash run_qwen38_flash_next_yarn_1m_pd_worker.sh prefill <PREFILL_IP> 41000 8998
 bash run_qwen38_flash_next_yarn_1m_pd_worker.sh decode <DECODE_IP> 42000 8998
 ```
 
-脚本默认 TP8、PP1、上下文 1,048,576、`max_total_tokens=6000000`（设置 `QWEN38_OPTIMIZED=0` 可切换到更保守的 1,200,000），并包含 `--reasoning-parser qwen3` 和 `--tool-call-parser qwen3_coder`。
+脚本默认 TP8、PP1、上下文 1,048,576、`max_total_tokens=6000000`（设置 `QWEN38_OPTIMIZED=0` 可切换到更保守的 1,200,000），并包含 `--reasoning-parser qwen3` 和 `--tool-call-parser qwen3_coder`。为避开 Qwen3.8 QSA 的 draft-prefill CUDA 非法地址问题，NEXTN/EAGLE speculative 参数只在 Decode worker 上启用，Prefill worker 使用普通路径。
 
 ## 启动 Router
 
