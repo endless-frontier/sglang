@@ -1,0 +1,23 @@
+{
+  "region": "cn-shanghai",
+  "workspace_id": "REPLACE_WITH_H200_EAS_WORKSPACE_ID",
+  "quota_id": "REPLACE_WITH_H200_EAS_CPU_QUOTA_ID",
+  "gateway_id": "REPLACE_WITH_H200_EAS_DEDICATED_GATEWAY_ID",
+  "network": {
+    "vpc_id": "REPLACE_WITH_H200_VPC_ID",
+    "vswitch_id": "REPLACE_WITH_H200_EAS_VSWITCH_ID",
+    "security_group_id": "REPLACE_WITH_H200_EAS_SECURITY_GROUP_ID"
+  },
+  "storage": [
+    {
+      "type": "cpfs",
+      "file_system_id": "REPLACE_WITH_CPFS_FILESYSTEM_ID",
+      "path": "/",
+      "mount_path": "/mnt/data",
+      "enable_cache": false
+    }
+  ],
+  "container": {
+    "image": "REPLACE_WITH_CUDA13_PYTHON_PROXY_IMAGE_URI"
+  }
+}

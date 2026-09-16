@@ -136,9 +136,9 @@
   "router": {
     "prefill_policy": "round_robin",
     "decode_policy": "round_robin",
-    "max_concurrent_requests": 4,
-    "queue_size": 0,
-    "queue_timeout_secs": 60,
+    "max_concurrent_requests": 200,
+    "queue_size": 200,
+    "queue_timeout_secs": 600,
     "request_timeout_secs": 7200,
     "worker_startup_timeout_secs": 1800,
     "disable_retries": false,

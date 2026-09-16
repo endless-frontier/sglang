@@ -75,7 +75,7 @@ export SGLANG_DISAGGREGATION_QUEUE_SIZE="${QWEN38_PD_QUEUE_SIZE:-4}"
 # SGLang 0.5.18 only supports decode DCP>1 for MLA/hybrid-MLA pools. Qwen3.8
 # uses a hybrid GDN + GQA pool, so PD must use DCP1 on both sides.
 DCP_SIZE="${QWEN38_PD_DCP_SIZE:-1}"
-MAX_RUNNING_REQUESTS="${QWEN38_PD_MAX_RUNNING_REQUESTS:-8}"
+MAX_RUNNING_REQUESTS="${QWEN38_PD_MAX_RUNNING_REQUESTS:-96}"
 CUDA_GRAPH_MAX_BS_DECODE="${QWEN38_PD_CUDA_GRAPH_MAX_BS_DECODE:-32}"
 EP_SIZE="${QWEN38_EP_SIZE:-}"
 OPTIMIZED="${QWEN38_OPTIMIZED:-1}"
@@ -157,7 +157,6 @@ if [[ "${OPTIMIZED}" == "1" ]]; then
             --speculative-num-steps 3
             --speculative-eagle-topk 1
             --speculative-num-draft-tokens 4
-            --max-running-requests "${QWEN38_PD_MAX_RUNNING_REQUESTS:-96}"
         )
     fi
 fi
