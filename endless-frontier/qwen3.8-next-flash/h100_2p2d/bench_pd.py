@@ -25,8 +25,9 @@ BASE_TEXT = (
 )
 
 
-def build_prompt_text(tokenizer, n_tokens: int) -> tuple[str, int]:
-    ids = tokenizer.encode(BASE_TEXT, add_special_tokens=False)
+def build_prompt_text(tokenizer, n_tokens: int, salt: str = "") -> tuple[str, int]:
+    seed_text = (salt + "\n" + BASE_TEXT) if salt else BASE_TEXT
+    ids = tokenizer.encode(seed_text, add_special_tokens=False)
     if not ids:
         raise SystemExit("tokenizer 返回空 token 序列")
     if n_tokens <= len(ids):
@@ -60,6 +61,9 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=7200.0)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--label", default="")
+    ap.add_argument("--salt", default="",
+                    help="前缀盐：非空时整条 prompt 与其它 salt 完全不同（用于打冷启动），"
+                         "同一个 salt 重复发送则可命中前缀缓存（L1/L2）")
     ap.add_argument("--ignore-eos", type=int, default=1, choices=[0, 1],
                     help="1=强制生成到 max_tokens（压测用），0=允许模型自然停止")
     args = ap.parse_args()
@@ -67,7 +71,7 @@ def main() -> int:
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
-    prompt_text, client_tokens = build_prompt_text(tok, args.input_tokens)
+    prompt_text, client_tokens = build_prompt_text(tok, args.input_tokens, args.salt)
 
     payload = {
         "model": args.model,
@@ -86,6 +90,8 @@ def main() -> int:
 
     endpoint = args.url.rstrip("/") + "/v1/chat/completions"
     label = args.label or f"in={args.input_tokens} out={args.output_tokens}"
+    if args.salt:
+        label = f"{label} salt={args.salt}"
     print(f"[bench] {label}: 客户端构造 {client_tokens} token，POST {endpoint}", file=sys.stderr)
 
     t0 = time.perf_counter()

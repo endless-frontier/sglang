@@ -27,6 +27,13 @@ set -Eeuo pipefail
 #   * KV 传输默认 mooncake + RoCE v2（MC_GID_INDEX=3，mlx5_0..7 一卡一 HCA）；
 #     RDMA 不通时可用 QWEN38_PD_TRANSFER_BACKEND=mooncake_tcp 走 TCP；
 #   * --max-total-tokens 默认不传（由显存 profile 自动算），需要封顶再用 QWEN38_PD_MAX_TOTAL_TOKENS。
+#   * 显存调优（2026-09-17 实测，TTFT/TPS 不变）：
+#     - mem-fraction-static 默认 0.93（原 0.85）：prefill 1.47M -> 1.74M、decode 2.25M -> 2.72M token；
+#     - prefill 默认 --max-mamba-cache-size 640（原为自动 sizing=2771 槽/18.98GB，用量 <1%）
+#       -> prefill KV 池 2.94M token；用 QWEN38_PD_MAX_MAMBA_CACHE_SIZE=auto 恢复自动。
+#     细节见 README「KV cache 容量调优」。
+#   * HiCache（L2 host 内存池）默认：**prefill 开 ratio 1.5**（host 池 +4.40M token/rank，
+#     每台约 490GB 内存），decode 不开；QWEN38_PD_HICACHE_RATIO=off 关闭。见 README「HiCache」。
 # ============================================================================
 
 if [[ $# -lt 3 ]]; then
@@ -52,7 +59,7 @@ MODEL_PATH="${QWEN38_MODEL_PATH:-/mnt/data/public_data/public_model/Qwen3.8/Qwen
 SGLANG_SOURCE="${QWEN38_SGLANG_SOURCE:-/mnt/data/xinyuzhu/sglang}"
 TP_SIZE="${QWEN38_TP_SIZE:-8}"
 CONTEXT_LENGTH="${QWEN38_CONTEXT_LENGTH:-1048576}"
-MEM_FRACTION_STATIC="${QWEN38_MEM_FRACTION_STATIC:-0.85}"
+MEM_FRACTION_STATIC="${QWEN38_MEM_FRACTION_STATIC:-0.93}"
 MAX_RUNNING_REQUESTS="${QWEN38_MAX_RUNNING_REQUESTS:-96}"
 CHUNKED_PREFILL_SIZE="${QWEN38_CHUNKED_PREFILL_SIZE:-8192}"
 PAGE_SIZE="${QWEN38_PAGE_SIZE:-64}"
@@ -62,6 +69,34 @@ SPECULATIVE="${QWEN38_SPECULATIVE:-1}"          # 仅 decode 生效
 ATTENTION_BACKEND="${QWEN38_ATTENTION_BACKEND:-auto}"
 TRANSFER_BACKEND="${QWEN38_PD_TRANSFER_BACKEND:-mooncake}"
 MAX_TOTAL_TOKENS="${QWEN38_PD_MAX_TOTAL_TOKENS:-}"
+MAX_MAMBA_CACHE_SIZE="${QWEN38_PD_MAX_MAMBA_CACHE_SIZE:-}"
+# HiCache（L2 host 内存池）——当前交付方案的默认值：
+#   prefill 默认 ratio 1.5（host KV 池 4,403,456 token/rank = 54.11GB/rank，另加 7.07GB/rank
+#   的 host Mamba state，每台约 490GB 内存）；decode 默认不开。
+#   实测：冷启动 TTFT / decode TPS 与不开 HiCache 一致；L2 命中把 300k 重复 prompt 从 14s 降到 1.6s。
+#   关闭：QWEN38_PD_HICACHE_RATIO=off（也认 none/disable/0）；改值：=2.0 等
+#   （1TB 节点上限 ≈2.2，超了启动会报 Not enough host memory available）。
+HICACHE_RATIO="${QWEN38_PD_HICACHE_RATIO:-}"
+case "${HICACHE_RATIO}" in
+    off|none|disable|disabled|no|0) HICACHE_RATIO="" ;;
+    "") HICACHE_RATIO="$( [[ "${ROLE}" == "prefill" ]] && printf '1.5' || printf '' )" ;;
+esac
+HICACHE_SIZE_GB="${QWEN38_PD_HICACHE_SIZE:-}"         # 例：64 -> 每 rank 固定 64GB host 池（覆盖 ratio）
+HICACHE_WRITE_POLICY="${QWEN38_PD_HICACHE_WRITE_POLICY:-write_through}"
+HICACHE_MEM_LAYOUT="${QWEN38_PD_HICACHE_MEM_LAYOUT:-page_first}"
+HICACHE_STORAGE_BACKEND="${QWEN38_PD_HICACHE_STORAGE_BACKEND:-}"   # 例：file（L3 磁盘层）
+HICACHE_STORAGE_DIR="${QWEN38_PD_HICACHE_STORAGE_DIR:-}"
+HICACHE_STORAGE_CONFIG="${QWEN38_PD_HICACHE_STORAGE_CONFIG:-}"     # 例：{"max_size":"128G","min_free_space":"50G"}
+# Mamba/SSM state 池：prefill 端若交给自动 sizing（--mamba-full-memory-ratio 0.9），
+# 实测会膨胀到 18.98GB / 2771 槽（conv 0.71 + ssm 18.27），而日志里 mamba usage < 1%，
+# 把 KV 池挤到只剩 ~20GB；封顶 640 槽（~4.4GB）把腾出的显存给 KV：
+# prefill 池 1.73M -> 2.94M token（+69%），并发/性能不变。
+# 640//ratio(=5) = 128 ≥ max_running_requests(96)，不会压低并发；=auto 恢复自动 sizing。
+if [[ "${MAX_MAMBA_CACHE_SIZE}" == "auto" ]]; then
+    MAX_MAMBA_CACHE_SIZE=""
+elif [[ -z "${MAX_MAMBA_CACHE_SIZE}" && "${ROLE}" == "prefill" ]]; then
+    MAX_MAMBA_CACHE_SIZE=640
+fi
 SERVED_MODEL_NAME="${QWEN38_SERVED_MODEL_NAME:-qwen38-flash-next-1m}"
 IB_DEVICE_MAP="${QWEN38_PD_IB_DEVICE_MAP:-{\"0\":\"mlx5_0\",\"1\":\"mlx5_1\",\"2\":\"mlx5_2\",\"3\":\"mlx5_3\",\"4\":\"mlx5_4\",\"5\":\"mlx5_5\",\"6\":\"mlx5_6\",\"7\":\"mlx5_7\"}}"
 
@@ -226,6 +261,8 @@ if [[ -d "$SGLANG_SOURCE/.git" ]]; then
 fi
 note "角色/地址   : $ROLE @ ${LOCAL_IP}:${API_PORT}（bootstrap ${BOOTSTRAP_PORT}）"
 note "TP=$TP_SIZE context=$CONTEXT_LENGTH mem-fraction-static=$MEM_FRACTION_STATIC max-running-requests=$MAX_RUNNING_REQUESTS"
+note "max-mamba-cache-size=${MAX_MAMBA_CACHE_SIZE:-auto}"
+note "hicache: ratio=${HICACHE_RATIO:-off} size=${HICACHE_SIZE_GB:-off}GB storage=${HICACHE_STORAGE_BACKEND:-none}"
 note "attention-backend=$ATTENTION_BACKEND transfer-backend=$TRANSFER_BACKEND gid-index=$MC_GID_INDEX"
 note "NEXTN: $([[ "$ROLE" == decode && "$SPECULATIVE" == 1 ]] && echo on || echo off)"
 
@@ -278,6 +315,27 @@ fi
 
 if [[ -n "${MAX_TOTAL_TOKENS}" ]]; then
     args+=(--max-total-tokens "${MAX_TOTAL_TOKENS}")
+fi
+
+if [[ -n "${MAX_MAMBA_CACHE_SIZE}" ]]; then
+    args+=(--max-mamba-cache-size "${MAX_MAMBA_CACHE_SIZE}")
+fi
+
+# HiCache：L2 host 内存层（--hicache-ratio / --hicache-size），可选 L3 存储层
+if [[ -n "${HICACHE_RATIO}" || -n "${HICACHE_SIZE_GB}" || -n "${HICACHE_STORAGE_BACKEND}" ]]; then
+    args+=(--enable-hierarchical-cache --hicache-write-policy "${HICACHE_WRITE_POLICY}")
+    args+=(--hicache-mem-layout "${HICACHE_MEM_LAYOUT}")
+    if [[ -n "${HICACHE_RATIO}" ]]; then
+        args+=(--hicache-ratio "${HICACHE_RATIO}")
+    fi
+    if [[ -n "${HICACHE_SIZE_GB}" ]]; then
+        args+=(--hicache-size "${HICACHE_SIZE_GB}")
+    fi
+    if [[ -n "${HICACHE_STORAGE_BACKEND}" ]]; then
+        [[ -n "${HICACHE_STORAGE_DIR}" ]] && export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR="${HICACHE_STORAGE_DIR}"
+        args+=(--hicache-storage-backend "${HICACHE_STORAGE_BACKEND}")
+        [[ -n "${HICACHE_STORAGE_CONFIG}" ]] && args+=(--hicache-storage-backend-extra-config "${HICACHE_STORAGE_CONFIG}")
+    fi
 fi
 
 # NEXTN/MTP：只在 decode 打开（QSA draft-prefill 长上下文有 CUDA 非法地址缺陷）
