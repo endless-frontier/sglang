@@ -1,11 +1,12 @@
 # Qwen3.8 Flash Next 部署配方
 
-四套可直接照抄的部署方案。**没接触过这个项目的同学（或 Agent）：先看下面这张表，
+五套可直接照抄的部署方案。**没接触过这个项目的同学（或 Agent）：先看下面这张表，
 选一行，进对应目录读 README。**
 
 | 场景 | 目录 | 机器 | 已验证镜像 |
 |---|---|---|---|
 | **单机最快起服务** | [`h100/`](h100/README.md) | 8×H100 | `dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sglang:sglang-0-5-18-qwen38-next-flash-h100-1m` |
+| **PD 分离（手工 SSH，4 机）** | [`h100_2p2d/`](h100_2p2d/README.md) | 4×8×H100 | 同 `h100/` 镜像（flashinfer 0.6.18） |
 | 单机 | [`h200/`](h200/README.md) | 8×H200 | `pai-ai-prod-acr-registry.cn-shanghai.cr.aliyuncs.com/acr_namespace/scimaster:sglang-0-5-18-cuda13-qwen38-next-pd` |
 | PD 分离（手工 SSH，4 机） | [`h200_2p2d/`](h200_2p2d/README.md) | 4×8×H200 | 同上 |
 | PD 分离（阿里云 EAS/DLC） | [`aliyun_h200_2p2d/`](aliyun_h200_2p2d/README.md) | 4×8×H200 | 同上（配置模板里填 image URI） |
@@ -16,7 +17,7 @@ YaRN 写法、PD 参数、Router 限流、已知缺陷、验证清单。
 ## 30 秒决策
 
 - **有一台 8 卡 Hopper 机器，想马上验证模型/微调权重？** → `h100/`（H100）或 `h200/`（H200）。
-- **要扛线上流量、要 PD 分离？** → `h200_2p2d/` 或 `aliyun_h200_2p2d/`。
+- **要扛线上流量、要 PD 分离？** → `h100_2p2d/`（4×H100）、`h200_2p2d/` 或 `aliyun_h200_2p2d/`。
 
 ## 最小可用命令（H100 单机）
 
@@ -43,6 +44,8 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:40000/health)
 
 ## 已知缺陷（上线前必读）
 
-- 单请求 prefill > 约 262k token 时，QSA draft-prefill 可能触发 CUDA illegal access；
-  排障/超长文本建议先 `QWEN38_SPECULATIVE=0` 关掉 NEXTN，并保留健康检查/自动重启。
+- 单请求 prefill > 约 262k token 时，QSA draft-prefill 曾触发 CUDA illegal access。
+  upstream 修复（clamp gather + MTP stream 复用）已随 2026-09-17 的 `main` merge
+  进入 `dev`；`h100_2p2d/` 用该树实测 300k / 800k 无崩溃。老的 H200 源码树还没有
+  这两个修复，排障时可先 `QWEN38_SPECULATIVE=0` 关掉 NEXTN，并保留健康检查/自动重启。
   详见 `DEPLOYMENT_PRACTICE.md` §6。

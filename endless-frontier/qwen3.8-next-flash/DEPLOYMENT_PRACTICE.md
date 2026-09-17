@@ -1,11 +1,13 @@
 # Qwen3.8 Flash Next 部署实践（各方案共用）
 
-这份文档记录各套配方（`h100`、`h200`、`h200_2p2d`、`aliyun_h200_2p2d`）共用的
-环境基线、参数含义和踩坑经验。单个方案的启动命令见各自目录下的 README：
+这份文档记录各套配方（`h100`、`h100_2p2d`、`h200`、`h200_2p2d`、
+`aliyun_h200_2p2d`）共用的环境基线、参数含义和踩坑经验。单个方案的启动命令见各自
+目录下的 README：
 
 | 目录 | 场景 |
 |---|---|
 | `h100/` | **H100 单机 8 卡**，已配套镜像，最快路径起服务 |
+| `h100_2p2d/` | **H100 四机 2P2D**（手工 SSH，含压测脚本与参考性能） |
 | `h200/` | H200 单机 8 卡 |
 | `h200_2p2d/` | H200 四机 2P2D（手工 SSH） |
 | `aliyun_h200_2p2d/` | 阿里云 EAS/DLC 版 2P2D |
@@ -19,10 +21,10 @@
 | SGLang | 0.5.18（官方 `main` 基线） | 需要含 `qwen4_exp` 配置/模型的版本 |
 | sglang-kernel | **0.4.7** | 0.4.6.post1 会在 Decode 的 PLE conv state 传输上失败 |
 | flashinfer | ≥0.6.18（当 flashinfer 被选作 attention backend 时） | `flashinfer_python`/`-cubin`/`-jit-cache` 三者必须同版本，见 §2.4 |
-| 镜像（H100 单机） | `dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sglang:sglang-0-5-18-qwen38-next-flash-h100-1m` | 内置 flashinfer 0.6.18，`h100/` 配方验证过 |
+| 镜像（H100 单机 / H100 2P2D） | `dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sglang:sglang-0-5-18-qwen38-next-flash-h100-1m` | 内置 flashinfer 0.6.18、mooncake 0.3.12、sglang-router 0.3.2；`h100/` 与 `h100_2p2d/` 验证过 |
 | 镜像（H200 / PD） | `pai-ai-prod-acr-registry.cn-shanghai.cr.aliyuncs.com/acr_namespace/scimaster:sglang-0-5-18-cuda13-qwen38-next-pd` | 内置 flashinfer 0.6.17，必须显式 `--attention-backend fa3`，见 §2.4 |
 | 模型 | `/mnt/data/public_models/Qwen3.8-Flash-Next` | `model_type=qwen4_exp`，原生 262,144 |
-| 源码 | `/mnt/data/xinyu/sglang-qwen38-upstream-1789383617`（`h100/` 用 `/mnt/data/xinyuzhu/sglang` 的 `dev` 分支） | 通过 `PYTHONPATH` 优先于镜像内置 SGLang |
+| 源码 | `/mnt/data/xinyuzhu/sglang`（`dev` 分支，**推荐**）；老的 H200 树 `/mnt/data/xinyu/sglang-qwen38-upstream-1789383617` | 通过 `PYTHONPATH` 优先于镜像内置 SGLang；dev 已含 §6 的 QSA 修复 |
 | 传输 | Mooncake + RoCE v2（`MC_GID_INDEX=3`）+ IBGDA | PD 分离必需 |
 | Parser | `--reasoning-parser qwen3`、`--tool-call-parser qwen3_coder` | 三套方案都要带 |
 
@@ -184,9 +186,9 @@ No tokens available and queuing is disabled, returning 429
 排查 429 时先看 Router 日志的这行，再确认是否 worker 侧已经崩了（两者表现不同：
 worker 崩溃表现为 502/超时/健康检查失败）。
 
-## 6. 已知缺陷：长上下文 Prefill 的 QSA CUDA 崩溃
+## 6. 长上下文 Prefill 的 QSA CUDA 崩溃（dev 已修复）
 
-- 触发：单请求 prefill 超过约 262k token。
+- 触发（修复前）：单请求 prefill 超过约 262k token。
 - 日志：
 
 ```text
@@ -195,11 +197,19 @@ qwen4_exp.py -> qsa_indexer.py -> get_prefill_mqa_inputs -> sequence_lengths.tol
 User-specified context_length (1048576) is greater than the derived context_length (262144)
 ```
 
-- 影响：Worker 进程仍在、`/metrics` 可访问，但推理线程已死；`/health` 随后超时。
-  两个 Prefill 都崩则服务整体不可用。
-- 现有缓解：`watch_prefill.sh` 做健康检查 + 自动重启；Router 会自动摘除/恢复节点。
-- 尚未根治：需要上游修复 QSA/indexer 对 YaRN 长上下文（>262k）的处理；
-  在修复前建议限制超长请求的并发并保留 watchdog。
+- 根因与修复（upstream `main`）：
+  - `d72e59508`（reland of #38346 / #39446）：QSA compressed-K gather 越界，
+    `python/sglang/srt/layers/attention/qsa/qsa_indexer.py:324` 加上
+    `group_locs = group_locs.clamp_max(source_keys.shape[0] - 1)`；
+  - `2c0a70960`：MTP 复用旧 CUDA stream，不再无限创建 stream。
+- 当前状态：`dev` 已于 2026-09-17 merge upstream `main`（merge commit `07d41b2ae`），
+  上面两个提交都在 dev 上。H100 2P2D（`h100_2p2d/`）用该树实测
+  **300k 与 800k 输入 + 10k 输出均无 CUDA 报错**（见 `h100_2p2d/RESULTS.md`）。
+- 仍需注意：老的 H200 源码树（`/mnt/data/xinyu/sglang-qwen38-upstream-*`，基于 fork
+  的旧 commit）**没有**这两个修复，长上下文仍会崩；建议 H200 那套也切到
+  `/mnt/data/xinyuzhu/sglang` 的 dev 分支，切换前保留 §7 的 watchdog 与限流。
+- 影响（未修复时）：Worker 进程仍在、`/metrics` 可访问，但推理线程已死；
+  `/health` 随后超时。两个 Prefill 都崩则服务整体不可用。
 
 ## 7. 日志、进程与重启
 
@@ -212,7 +222,8 @@ User-specified context_length (1048576) is greater than the derived context_leng
 
 ## 8. 交付前的验证清单
 
-1. `curl /health` 四个 worker 全 200，Router `/workers` 全 `is_healthy=true`。
+1. `curl /health` 四个 worker 全 200，Router `/workers` 全 `is_healthy=true`
+   （H100 2P2D 建议再跑一次 300k 输入 / 10k 输出，见 `h100_2p2d/RESULTS.md`）。
 2. 一个短请求 + 一个长请求（例如 300k 输入 / 128 输出）都能正常返回。
 3. Router 日志无 `No tokens available`；`/metrics` 能看到 NEXTN 接受率（Decode）。
 4. 确认 watchdog 在两台 Prefill 上运行，且 PID 文件指向真实 worker 进程。
