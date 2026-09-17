@@ -38,6 +38,9 @@ set -Eeuo pipefail
 #     细节见 README「KV cache 容量调优」。
 #   * HiCache（L2 host 内存池）默认：**prefill 开 ratio 1.5**（host 池 +4.40M token/rank，
 #     每台约 490GB 内存），decode 不开；QWEN38_PD_HICACHE_RATIO=off 关闭。见 README「HiCache」。
+#   * /health 的 detokenizer 检查窗口 20s -> 300s（SGLANG_HEALTH_CHECK_TIMEOUT=300，
+#     QWEN38_PD_HEALTH_CHECK_TIMEOUT 可覆盖）：detokenizer 抖动时 /health 不再秒级 503，
+#     详见 README「看门狗 / 为什么不能只用 pgrep」。
 # ============================================================================
 
 if [[ $# -lt 3 ]]; then
@@ -249,6 +252,10 @@ export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
 export SGLANG_OPT_FUSE_SWIGLU_INTERLEAVED="${QWEN38_FUSE_SWIGLU_INTERLEAVED:-1}"
+# /health 的 detokenizer 心跳窗口：SGLang 默认 20s（服务端 HEALTH_CHECK_TIMEOUT，
+# http_server.py:193 读的就是这个环境变量）——detokenizer 稍有抖动 /health 就返 503，
+# 会被 Router / 看门狗当成硬失败。这里放宽到 300s（5 分钟）。
+export SGLANG_HEALTH_CHECK_TIMEOUT="${QWEN38_PD_HEALTH_CHECK_TIMEOUT:-300}"
 
 # PD / Mooncake
 export MC_GID_INDEX="${QWEN38_MC_GID_INDEX:-3}"          # RoCE v2 IPv4 GID（mlx5_i 的 eth_i）
@@ -270,6 +277,7 @@ note "TP=$TP_SIZE context=$CONTEXT_LENGTH mem-fraction-static=$MEM_FRACTION_STAT
 note "max-mamba-cache-size=${MAX_MAMBA_CACHE_SIZE:-auto}"
 note "hicache: ratio=${HICACHE_RATIO:-off} size=${HICACHE_SIZE_GB:-off}GB storage=${HICACHE_STORAGE_BACKEND:-none}"
 note "attention-backend=$ATTENTION_BACKEND transfer-backend=$TRANSFER_BACKEND gid-index=$MC_GID_INDEX"
+note "health-check-timeout=${SGLANG_HEALTH_CHECK_TIMEOUT}s（detokenizer 心跳窗口；SGLang 默认 20s）"
 note "NEXTN: $([[ "$ROLE" == decode && "$SPECULATIVE" == 1 ]] && echo on || echo off)"
 
 # ---------------------------------------------------------------------------

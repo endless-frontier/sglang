@@ -128,6 +128,7 @@ curl -s -X POST http://$ROUTER:40000/v1/chat/completions \
 | `--disaggregation-transfer-backend` | `mooncake` | RDMA 不通时用 `mooncake_tcp` |
 | `--disaggregation-ib-device` | `{"0":"mlx5_0",...,"7":"mlx5_7"}` | 一卡一 HCA，`nvidia-smi topo -m` 里 GPUi↔NICi 为 PIX |
 | `MC_GID_INDEX` | 3 | RoCE v2 IPv4 GID（`/sys/class/infiniband/mlx5_i/ports/1/gids/3`） |
+| `SGLANG_HEALTH_CHECK_TIMEOUT` | **300** | `/health` 里「detokenizer 心跳断多久算不健康」；脚本默认 300（SGLang 上游默认 20），覆盖用 `QWEN38_PD_HEALTH_CHECK_TIMEOUT`，见「看门狗」 |
 
 ### attention backend：Prefill 与 Decode **不一样**（正常现象）
 
@@ -228,8 +229,20 @@ Scheduler watchdog timeout (self.watchdog_timeout=300, self.soft=False)
 Subprocess scheduler_0 (pid=54464) crashed with exit code -6.
 ```
 
-`/health` 返 503（20 秒才回），进程却还在。**光 `pgrep` 查不出来，只有
+`/health` 返 503（detokenizer 心跳断了才回），进程却还在。**光 `pgrep` 查不出来，只有
 「/health 连续 N 次非 200」能查出来。** 所以判定同时用两个信号：
+
+> **「断多久才算不健康」是可配的**：上面的 20 秒来自 SGLang 服务端常量
+> `HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))`
+> （`python/sglang/srt/entrypoints/http_server.py:193`）。worker 脚本默认把它放宽到
+> **300 秒（5 分钟）**：
+> - detokenizer 抖动时 `/health` 最多等 5 分钟才返 503，而不是 20 秒就判死；
+> - Router 侧不受影响：它自己有 `--health-check-timeout-secs 5`（间隔 10s、失败 3 次），
+>   仍会在 ~30 秒内把该 worker 摘出路由；
+> - 看门狗侧从「503 硬失败 ×3」变成「30s 超时 = 软失败」路径：要额外持续
+>   `QWEN38_WATCH_MIN_SOFT_DURATION`（180s）且确认之后没干过活才重启，更保守。
+> - 覆盖用 `QWEN38_PD_HEALTH_CHECK_TIMEOUT=<秒>`；**改完要重启 worker 才生效**
+>   （看门狗之后重启节点时会自动带上新值）。
 
 | 信号 | 判定 | 动作 |
 |---|---|---|
@@ -286,7 +299,8 @@ python3 test_watch_worker.py              # 离线单测（打桩，不碰真机
    判定「真故障 vs 被连累」的硬证据是**时间线**：prefill-2 首次失败在 19:37:46，
    prefill-3 首次失败在 **19:52:36**（正好是 prefill-2 摘掉之后 18 秒）。
 2. **`/health` 返 503 和「超时」不是一回事**。503 是服务自己说「我不健康」
-   （detokenizer 心跳断了），是硬失败；超时可能只是忙。所以两者阈值处理不同。
+   （detokenizer 心跳断了——脚本默认要断 300 秒才报，见「为什么不能只用 `pgrep`」），
+   是硬失败；超时可能只是忙。所以两者阈值处理不同。
 
 ### 局限
 
@@ -344,6 +358,7 @@ python3 $DIR/bench_pd.py --input-tokens 800000 --output-tokens 10000 \
 | `FileNotFoundError: model-000xx-of-00073.safetensors` | 模型目录没拷完 / 被别人改过；`--check-only` 会列出缺失分片 |
 | `OSError ... Stale file handle` | NAS 上有人 rename-over 了正在读的文件；确认无人改写后重启 |
 | worker `/health` 超时但进程还在、`/metrics` 有响应 | 推理线程已死（历史上是 QSA 长上下文崩溃）；看日志有没有 `illegal memory access`，重启该 worker |
+| 日志刷 `couldn't get a response from detokenizer for last N seconds` | detokenizer 心跳停（窗口 = `SGLANG_HEALTH_CHECK_TIMEOUT`，脚本设 300s）。常见后续是 `Scheduler watchdog timeout` + 进程退出（exit -6），看门狗会拉起；频繁出现要查负载 / 长 chunk 下的 detokenizer 线程情况 |
 | Router `/workers` 里 worker `is_healthy=false` | worker 没起来或端口未放通；先直连 worker `/health` |
 | 新 Router 起不来，报 `FailedToCreateHTTPListener("Address already in use")` | 旧 Router 没杀干净，见「坑与开关」第 5 条 |
 | 客户端 429 | Router 限流（见「坑与开关」第 4 条） |
