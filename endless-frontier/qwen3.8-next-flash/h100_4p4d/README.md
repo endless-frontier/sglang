@@ -212,6 +212,92 @@ decode 不开；`QWEN38_PD_HICACHE_RATIO=off` 关闭，改值用 `=2.0` 等。
   → 1 TB 节点最多 **ratio ≈ 2.2**，超了启动直接报 `Not enough host memory available`。
 - 冷启动开销 ≈ 0（不吃显存、不吃算力），只有 L2 miss 时才多一次 host→GPU 拷贝。
 
+## 看门狗（自动重启，跑在 Router 那台机器上）
+
+`watch_worker.py` 常驻监控 4 台 prefill + 4 台 decode（外加本机 Router），
+异常时自动重启对应节点。**默认就跑在 Router 所在机器（decode-2）**。
+
+### 为什么不能只用 `pgrep`
+
+这套部署真正遇到的故障是**进程僵死**：`sglang.launch_server` 父进程还好好活着，
+但 detokenizer 心跳停了 / scheduler 卡死 ——
+
+```text
+Health check failed. Server couldn't get a response from detokenizer for last 20 seconds.
+Scheduler watchdog timeout (self.watchdog_timeout=300, self.soft=False)
+Subprocess scheduler_0 (pid=54464) crashed with exit code -6.
+```
+
+`/health` 返 503（20 秒才回），进程却还在。**光 `pgrep` 查不出来，只有
+「/health 连续 N 次非 200」能查出来。** 所以判定同时用两个信号：
+
+| 信号 | 判定 | 动作 |
+|---|---|---|
+| SSH 上去 `pgrep sglang.launch_server` 查不到 | `process-gone` | 重启 |
+| 进程在，但 `/health` 连续 3 次失败，且**首次失败之后一次活都没干** | `process-wedged` | 重启 |
+| 进程在，`/health` 不正常，但首次失败之后还在干活 | 「忙」不是僵死 | **不重启**，计数清零 |
+| SSH 都连不上 | `node-unreachable` | 只告警（也重启不了） |
+
+「首次失败之后有没有干过活」= 读该节点 `/tmp/qwen38_<role>.log` 里最后一条
+`Prefill batch` / `Decode batch` 的时间戳。**注意不能看日志最后一行** ——
+僵死的服务会一直刷 `Health check failed`，看最后一行会以为它很活跃。
+
+### 启动 / 停止 / 查看
+
+```bash
+# 在 Router 那台机器上（默认 decode-2 / 10.0.1.127）
+cd /mnt/data/xinyuzhu/sglang/endless-frontier/qwen3.8-next-flash/h100_4p4d
+nohup setsid python3 watch_worker.py > /tmp/qwen38_watchdog.out 2>&1 &
+
+python3 watch_worker.py --status          # 看当前状态（JSON 摘要）
+tail -f /tmp/qwen38_watchdog.log          # 看动作日志
+python3 -c "import json;print(json.load(open('/tmp/qwen38_watchdog_status.json')))"
+
+python3 watch_worker.py --once --dry-run  # 单次巡检，只判定不重启
+kill $(cat /tmp/qwen38_watchdog.pid)      # 停止
+python3 test_watch_worker.py              # 离线单测（打桩，不碰真机）
+```
+
+⚠️ **重启看门狗前先 `kill` 掉旧的**：单实例锁在 `/tmp/qwen38_watchdog.pid`，
+重复启动会直接报错退出。
+
+### 参数（环境变量）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `QWEN38_WATCH_PREFILL_IPS` / `_DECODE_IPS` | 本集群 4+4 个 IP | 逗号分隔的节点列表 |
+| `QWEN38_WATCH_INTERVAL` | 30 | 巡检间隔秒 |
+| `QWEN38_WATCH_FAIL_THRESHOLD` | 3 | 连续失败几次算故障 |
+| `QWEN38_WATCH_COOLDOWN` | **300** | 同一节点两次重启最小间隔（5 分钟） |
+| `QWEN38_WATCH_STARTUP_TIMEOUT` | 900 | 重启后等它加载完的窗口（权重 336GB，约 5~6 分钟） |
+| `QWEN38_WATCH_MAX_CONCURRENT` | 2 | 同时重启的节点数上限（错开 NAS 读盘） |
+| `QWEN38_WATCH_HTTP_TIMEOUT` | 30 | 单次 `/health` 超时 |
+| `QWEN38_WATCH_MIN_SOFT_DURATION` | 180 | 超时类失败还要持续这么久才动手 |
+| `QWEN38_WATCH_DRY_RUN` | 0 | 1 = 只判定不重启 |
+| `QWEN38_WATCH_MONITOR_ROUTER` | 1 | 0 = 不监控本机 Router |
+
+### 两个必须知道的坑（都是实测踩出来的）
+
+1. **别把「忙」当「僵」**。2026-09-17 现场：prefill-2 真挂了被重启，它的流量
+   瞬间压到 prefill-3，prefill-3 的 HTTP 线程被大 chunk 堵住，`/health` 连续超时
+   —— 早期版本（10s 超时 + 只看日志活跃度）把**健康的 prefill-3 也重启了**。
+   现在的三重防护：`/health` 超时放宽到 30s；超时类失败要额外持续 180s；
+   重启前复核「首次失败之后有没有干活」。
+   判定「真故障 vs 被连累」的硬证据是**时间线**：prefill-2 首次失败在 19:37:46，
+   prefill-3 首次失败在 **19:52:36**（正好是 prefill-2 摘掉之后 18 秒）。
+2. **`/health` 返 503 和「超时」不是一回事**。503 是服务自己说「我不健康」
+   （detokenizer 心跳断了），是硬失败；超时可能只是忙。所以两者阈值处理不同。
+
+### 局限
+
+- 看门狗自己**没有**被监控：它挂了就没人重启它。跑在同一台机器上的 Router 同理。
+  要更稳可以两台机器各跑一份（`QWEN38_WATCH_MONITOR_ROUTER=0` 跑第二份，避免双方
+  同时重启 Router）。
+- 「node-unreachable」只告警不重启（SSH 都不通，重启也无从谈起）。
+- 节点镜像是**没有 ssh 客户端**的（`/usr/bin/ssh` 不存在、apt 也装不了
+  `openssh-client`），所以看门狗用 `paramiko`（已 `pip install`）直连内网
+  `10.0.x.x:22`。换镜像时记得带上 paramiko，否则看门狗会 `ModuleNotFoundError`。
+
 ## 压测
 
 `bench_pd.py` 用模型自带 tokenizer 构造指定长度的输入，流式统计 TTFT / 端到端 /
