@@ -18,10 +18,15 @@ OpenAI 兼容请求分发到 Prefill/Decode 组合。
 
 四个节点必须使用同一镜像、同一份 SGLang 源码、同一模型目录：
 
-- CUDA 13.0 **devel** 镜像（含 `nvcc` 与 toolkit headers）、PyTorch cu130、
-  SGLang 0.5.18、`sglang-kernel==0.4.7`、FlashInfer、Triton。
+- 镜像（当前线上，四个节点必须完全一致）：
+  `pai-ai-prod-acr-registry.cn-shanghai.cr.aliyuncs.com/acr_namespace/scimaster:sglang-0-5-18-cuda13-qwen38-next-pd`
+  —— CUDA 13.0 **devel**（含 `nvcc` 与 toolkit headers）、PyTorch cu130、
+  SGLang 0.5.18、`sglang-kernel==0.4.7`、flashinfer 0.6.17、Triton。
   **不要**让 pip 包 `nvidia/cu13` 的 `nvcc 13.3` 抢到 `PATH`，见
-  `../DEPLOYMENT_PRACTICE.md`。
+  `../DEPLOYMENT_PRACTICE.md` §2.1。
+  worker 里必须显式 `--attention-backend fa3`（脚本已带）：镜像内置的
+  flashinfer 0.6.17 会在「flashinfer 被选作 attention backend」时触发
+  `flashinfer_python>=0.6.18` 断言，见 `../DEPLOYMENT_PRACTICE.md` §2.4。
 - Qwen3.8 兼容源码：`/mnt/data/xinyu/sglang-qwen38-upstream-1789383617`
   （官方 `main` + Qwen4-Exp PD 修复）。
 - 模型：`/mnt/data/public_models/Qwen3.8-Flash-Next`（`config.json`、权重分片、

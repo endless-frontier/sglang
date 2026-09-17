@@ -3,9 +3,22 @@
 在一台 8×H200 主机上以 TP8 启动 Qwen3.8 Flash Next，适合验证模型、YaRN 配置、
 LoRA/微调权重和 OpenAI 兼容 API。没有 PD 转发，服务直接监听 `0.0.0.0:40000`。
 
+## 使用镜像（当前线上）
+
+```text
+pai-ai-prod-acr-registry.cn-shanghai.cr.aliyuncs.com/acr_namespace/scimaster:sglang-0-5-18-cuda13-qwen38-next-pd
+```
+
+镜像内容：CUDA 13.0 devel + PyTorch cu130 + SGLang 0.5.18 +
+`sglang-kernel==0.4.7` + **flashinfer 0.6.17**。
+
+> flashinfer 0.6.17 会踩到 SGLang 的 `flashinfer_python>=0.6.18` 启动断言，
+> 所以本目录脚本默认显式传 `--attention-backend fa3`（与线上 PD worker 一致）。
+> 完整因果链见 [`../DEPLOYMENT_PRACTICE.md`](../DEPLOYMENT_PRACTICE.md) §2.4。
+
 ## 要求
 
-- CUDA 13.0 devel 镜像（含 `nvcc`/headers）、PyTorch cu130、SGLang 0.5.18、
+- 上述 CUDA 13.0 devel 镜像（含 `nvcc`/headers）、PyTorch cu130、SGLang 0.5.18、
   `sglang-kernel==0.4.7`、FlashInfer、Triton；`CUDA_HOME=/usr/local/cuda`。
 - Qwen3.8 兼容 SGLang 源码（默认 `/mnt/data/xinyu/sglang-qwen38`，可用
   `QWEN38_SGLANG_SOURCE` 覆盖）。
@@ -26,13 +39,17 @@ bash deploy_qwen38_flash_next_yarn_1m.sh
 
 脚本会：
 
-1. 备份原生配置到 `config.json.native.bak`（只做一次），再原子写入
-   `text_config.rope_parameters`（YaRN factor 4、`original_max_position_embeddings=262144`、
-   `rope_theta=10000000`）并在顶层镜像 `max_position_embeddings`；
-2. 校验 `model_type=qwen4_exp`、YaRN 已生效、SGLang 版本 0.5.18、8 张可见 GPU；
-3. 以 TP8 启动 SGLang：FlashInfer GDN、BF16 mamba state、NEXTN speculative
-   decoding、`--max-running-requests 96`、`--reasoning-parser qwen3`、
-   `--tool-call-parser qwen3_coder`，并设置 `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1`。
+1. 检查模型目录里的 `config.json` 是不是 1M 版本（YaRN factor 4）：
+   是就原样不动；不是才备份成 `config.json.native.bak` 再原子改写
+   （`rope_parameters` 写 YaRN、`rope_theta=10000000`、
+   `original_max_position_embeddings=262144`，并在顶层镜像
+   `max_position_embeddings`）。**只保留一份 config**，不会每次启动都重写文件。
+2. 校验 `model_type=qwen4_exp`、YaRN 已生效、SGLang 版本 0.5.18、8 张可见 GPU，
+   并预测这次会用到哪个 attention backend、flashinfer 版本是否满足断言。
+3. 以 TP8 启动 SGLang：**`--attention-backend fa3`**、FlashInfer GDN、
+   BF16 mamba state、NEXTN speculative decoding、`--max-running-requests 96`、
+   `--reasoning-parser qwen3`、`--tool-call-parser qwen3_coder`，并设置
+   `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1`。
 
 启动完成后：
 
@@ -49,12 +66,23 @@ curl -s -X POST http://<host>:40000/v1/chat/completions \
 |---|---|---|
 | `QWEN38_MODEL_PATH` | `/mnt/data/public_models/Qwen3.8-Flash-Next` | 也可指向微调 checkpoint（如内部 bio 权重），只要保持 `qwen4_exp` 架构与原生 262144 |
 | `QWEN38_SGLANG_SOURCE` | `/mnt/data/xinyu/sglang-qwen38` | Qwen3.8 兼容源码树 |
+| `QWEN38_ATTENTION_BACKEND` | `fa3` | `fa3`（默认，绕开 flashinfer 版本断言）/ `flashinfer`（镜像里 flashinfer≥0.6.18 时可用）/ `auto`（交回 SGLang 自选） |
 | `QWEN38_CONTEXT_LENGTH` | `1048576` | 单请求上下文上限，脚本上限即 1,048,576 |
 | `QWEN38_MEM_FRACTION_STATIC` | `0.90` | OOM 时降到 0.85 |
 | `QWEN38_CUDA_GRAPH_MAX_BS_DECODE` | `32` | 显存紧张时降到 16 |
 | `QWEN38_PORT` / `QWEN38_HOST` | `40000` / `0.0.0.0` | 监听地址 |
 | `QWEN38_API_KEY` | 空 | 设置后启用 `--api-key` |
 | `QWEN38_CHECK_ONLY` | `0` | 置 1 等价于 `--check-only` |
+
+## 版本边界：flashinfer 0.6.17 vs 0.6.18
+
+- 镜像里是 **0.6.17** → 必须让 attention backend 不是 flashinfer，脚本默认
+  `--attention-backend fa3`（线上 2P2D 也是 `fa3` + `--page-size 64`）。
+- 镜像升级到 **0.6.18**（`flashinfer_python` / `-cubin` / `-jit-cache` 三者同版本）后，
+  可以把 `QWEN38_ATTENTION_BACKEND` 设为 `flashinfer` 或 `auto`。
+- `SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1` 会同时跳过 flashinfer
+  与 sglang-kernel 两个断言，仅排障用。
+- 原理与代码位置：`../DEPLOYMENT_PRACTICE.md` §2.4。
 
 ## 容量与性能（实测）
 

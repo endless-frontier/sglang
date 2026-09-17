@@ -1,7 +1,14 @@
-# Qwen3.8 Flash Next 部署实践（三套方案共用）
+# Qwen3.8 Flash Next 部署实践（各方案共用）
 
-这份文档记录三套配方（`h200`、`h200_2p2d`、`aliyun_h200_2p2d`）共用的环境基线、
-参数含义和踩坑经验。单个方案的启动命令见各自目录下的 README。
+这份文档记录各套配方（`h100`、`h200`、`h200_2p2d`、`aliyun_h200_2p2d`）共用的
+环境基线、参数含义和踩坑经验。单个方案的启动命令见各自目录下的 README：
+
+| 目录 | 场景 |
+|---|---|
+| `h100/` | **H100 单机 8 卡**，已配套镜像，最快路径起服务 |
+| `h200/` | H200 单机 8 卡 |
+| `h200_2p2d/` | H200 四机 2P2D（手工 SSH） |
+| `aliyun_h200_2p2d/` | 阿里云 EAS/DLC 版 2P2D |
 
 ## 1. 环境基线
 
@@ -11,12 +18,15 @@
 | PyTorch | 2.13.0+cu130 | 与 CUDA 13.0 匹配 |
 | SGLang | 0.5.18（官方 `main` 基线） | 需要含 `qwen4_exp` 配置/模型的版本 |
 | sglang-kernel | **0.4.7** | 0.4.6.post1 会在 Decode 的 PLE conv state 传输上失败 |
+| flashinfer | ≥0.6.18（当 flashinfer 被选作 attention backend 时） | `flashinfer_python`/`-cubin`/`-jit-cache` 三者必须同版本，见 §2.4 |
+| 镜像（H100 单机） | `dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sglang:sglang-0-5-18-qwen38-next-flash-h100-1m` | 内置 flashinfer 0.6.18，`h100/` 配方验证过 |
+| 镜像（H200 / PD） | `pai-ai-prod-acr-registry.cn-shanghai.cr.aliyuncs.com/acr_namespace/scimaster:sglang-0-5-18-cuda13-qwen38-next-pd` | 内置 flashinfer 0.6.17，必须显式 `--attention-backend fa3`，见 §2.4 |
 | 模型 | `/mnt/data/public_models/Qwen3.8-Flash-Next` | `model_type=qwen4_exp`，原生 262,144 |
-| 源码 | `/mnt/data/xinyu/sglang-qwen38-upstream-1789383617` | 通过 `PYTHONPATH` 优先于镜像内置 SGLang |
+| 源码 | `/mnt/data/xinyu/sglang-qwen38-upstream-1789383617`（`h100/` 用 `/mnt/data/xinyuzhu/sglang` 的 `dev` 分支） | 通过 `PYTHONPATH` 优先于镜像内置 SGLang |
 | 传输 | Mooncake + RoCE v2（`MC_GID_INDEX=3`）+ IBGDA | PD 分离必需 |
 | Parser | `--reasoning-parser qwen3`、`--tool-call-parser qwen3_coder` | 三套方案都要带 |
 
-## 2. 三个最容易踩的环境坑
+## 2. 四个最容易踩的环境坑
 
 ### 2.1 nvcc 与 CUDA headers 版本不一致
 
@@ -65,9 +75,69 @@ ModuleNotFoundError: No module named 'sglang.srt.configs.qwen4_exp'
 DLC 版 `worker.py` 已把源码路径注入子进程env（`QWEN38_SGLANG_SOURCE`），
 不要改回只依赖 shell 导出。
 
+### 2.4 attention backend 与 `flashinfer_python >= 0.6.18` 断言
+
+**现象**：镜像里是 flashinfer 0.6.17，启动直接失败：
+
+```text
+flashinfer_python is installed with version 0.6.17, which is less than the
+minimum required version 0.6.18. Please uninstall the old version and reinstall
+the latest version by following the instructions at
+https://docs.flashinfer.ai/installation.html.
+```
+
+前置日志里通常还有这一行（说明自动选中的不是 fa3）：
+
+```text
+Attention backend not specified. Use flashinfer backend by default.
+```
+
+**因果链**（`dev@7ab7009c2`）：
+
+1. `python/sglang/srt/entrypoints/engine.py:1719-1732`：只有当
+   `attention_backends_of(...)` 的结果里出现 `flashinfer`（或
+   `dsa_topk_backend=flashinfer`）时，才断言 `flashinfer_python>=0.6.18`。
+2. `arg_groups/model_override_base.py:164`：`attention_backends_of()` 只看
+   `--attention-backend` / `--prefill-attention-backend` /
+   `--decode-attention-backend`——**`--linear-attn-*-backend flashinfer` 不算**，
+   所以 GDN 线性注意力用 0.6.17 是被允许的（线上就是这么跑的）。
+3. 不指定 `--attention-backend` 时：`arg_groups/overrides.py:1157`
+   `_attention_backend_default()` → `get_default_attn_backend()`
+   （`model_override_base.py:295`）。Hopper 上**只有**
+   `is_no_spec_infer_or_topk_one()` 为真才选 `fa3`（`:329`）。
+4. `utils/common.py:3699` `is_no_spec_infer_or_topk_one()` 要求
+   `page_size in (1, None)`；而 Qwen4-Exp 的 QSA 压缩注意力在
+   `arg_groups/model_overrides/qwen4_exp.py:84` 把 `page_size` 固定为 **64**
+   → 条件不成立 → 落到 else 分支 → 默认 **flashinfer**。
+5. 生产 PD 之所以没事：`h200_2p2d/run_qwen38_flash_next_yarn_1m_pd_worker.sh:107`
+   显式写了 `--attention-backend fa3`（配合 `--page-size 64` + NEXTN）。
+   **单机脚本如果没写，就会踩这个断言。**
+
+**三种修法**：
+
+| 方案 | 做法 | 说明 |
+|---|---|---|
+| A | 用带 flashinfer 0.6.18 的镜像（如 H100 镜像），或 `pip install -U --no-deps flashinfer_python==0.6.18 flashinfer-cubin==0.6.18 flashinfer-jit-cache==0.6.18` | 保持 SGLang 自选后端；三件套必须同版本 |
+| B | 显式 `--attention-backend fa3`（H200 单机脚本默认就是这样，`QWEN38_ATTENTION_BACKEND=fa3`） | 与线上 PD 一致，H100/H200（sm90）可用 |
+| C | `SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1` | 仅排障：它会跳过 `_KERNEL_VERSION_CHECK_PACKAGES` 里的 **flashinfer 与 sglang-kernel 两个**断言 |
+
+**两个脚本都已经内置了这条判断**：
+
+- `h100/deploy_qwen38_flash_next_yarn_1m.sh`：默认 `QWEN38_ATTENTION_BACKEND=auto`
+  （交给 SGLang 自选，配套镜像里是 flashinfer 0.6.18），启动前**预测**实际后端；
+  如果预测结果是 flashinfer 而版本 < 0.6.18，直接给出 A/B/C 三种修法并退出。
+- `h200/deploy_qwen38_flash_next_yarn_1m.sh`：默认 `fa3`（绕开断言），
+  同样会预测后端并做版本判断。
+
+注意：fa3 只在 Hopper（sm90）可用。如果机器是 A100/sm80，`--attention-backend fa3`
+不可用，只能走 A 或 C。
+
 ## 3. 模型与 YaRN
 
-- 脚本会备份原生 `config.json` 为 `config.json.native.bak`，再原子写入 YaRN：
+- 脚本**先检测**目标目录里的 `config.json` 是不是 1M（YaRN factor 4.0）版本：
+  已经是就不动文件；不是才备份成 `config.json.native.bak` 并原子改写。这样同一个
+  模型目录被多个容器/NAS 客户端并发启动时，不会因为反复 rename-over 触发
+  `OSError: [Errno 116] Stale file handle`。YaRN 写入内容：
 
 ```json
 "rope_parameters": {
