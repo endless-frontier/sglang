@@ -31,6 +31,34 @@
 （上表两例分别为 130 / 206 字符）。因此**调用方必须为 thinking 预留 `max_tokens`**，
 否则会以 `finish_reason=length` 结束而拿不到正文——首次冒烟测试就是这样，正文为空。
 
+## 用自有镜像复测（2026-10-03）
+
+自有镜像里已含源码与依赖（见 [`image/`](image/README.md)），作业不再注入任何共享源码树。
+
+- 镜像：`wangruisi/sglang-glm53-flash:sglang-d6221be-glm53-flash-l20z-1node-20261003-1a4d8b6`
+- 作业：`edlsfrtr-glmimg-20261003-045425`（单机 8 卡，8 卡上限与上面同一硬件）
+
+| 请求 | 结果 | 延迟 | token |
+|---|---|---|---|
+| `Reply with exactly: pong` | `content='pong'`，`finish_reason=stop` | 0.3 s | 17/35（含 33 思考） |
+| ~3.8k token 填充 + `longpong` | `content='longpong'`，`finish_reason=stop` | 33.4 s | 3820/51（含 48 思考） |
+
+与上面用团队镜像 + 共享源码树的数字一致，说明自有镜像没有引入回退。
+
+## 通过 EAS 公网入口实测（2026-10-03）
+
+服务名 `ef_glm53_flash_1node`，8 卡，共用 Lingjun 额度，CPFS 直接挂到 `/mnt/data/`，
+镜像与启动参数同上面一条。
+
+| 请求 | 结果 | 延迟（含网关与网络） |
+|---|---|---|
+| `/health` | 200（需带服务访问令牌） | — |
+| `Reply with exactly: pong` | `content='pong'`，`finish_reason=stop` | **1.2 s** |
+| ~3.8k token 填充 + `longpong` | `content='longpong'`，`finish_reason=stop` | **34.8 s** |
+
+短请求多出约 0.9 s 的网关与网络开销，长请求基本一致。EAS 路线上的四个坑（script 引用形式、
+`cuda-compat` 遮住平台注入的驱动、健康检查窗口、镜像用公网域名）见 [`eas/README.md`](eas/README.md)。
+
 ## 失败尝试（保留记录，便于排障）
 
 | 现象 | 原因 | 结论 |
@@ -43,4 +71,5 @@
 
 - 长上下文（≥262k）单请求：官方注明未修复前 QSA 类长上下文曾崩，本模型需另行实测。
 - 并发与吞吐：本表只有单请求数字，未做批量压测。
-- 对外暴露（EAS）与 PD 分离：未接。
+- PD 分离 / 多机：未接。
+- EAS 侧的长上下文与并发：未测。Qwen3.8-Flash-Next 的 EAS 入口同样未接。

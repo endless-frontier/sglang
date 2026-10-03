@@ -1,0 +1,68 @@
+{
+  "_comment": "GLM-5.3-Flash 单机 8 卡 EAS 服务模板。REPLACE_WITH_* 要替换成真实值，真实值不要提交进仓库。镜像地址用 ACR 的【公网】域名：VPC 域名在本工作空间的 EAS 侧拉取失败（Unable to pull image），公网域名同一镜像可以拉取。script 必须是 shell 引用后的 argv 串（形如 bash -c '...'），裸字符串会被 EAS 当成单个 argv 而直接崩掉。",
+  "cloud": {
+    "networking": {
+      "security_group_id": "REPLACE_WITH_SECURITY_GROUP_ID",
+      "vpc_id": "REPLACE_WITH_VPC_ID",
+      "vswitch_id": "REPLACE_WITH_VSWITCH_ID"
+    }
+  },
+  "containers": [
+    {
+      "image": "REPLACE_WITH_OUR_IMAGE_URI_PUBLIC",
+      "port": 8000,
+      "script": "bash -c 'set -uo pipefail; export HOME=/tmp/eas-home TMPDIR=/tmp/eas-tmp TRITON_CACHE_DIR=/tmp/triton-cache TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor XDG_CACHE_HOME=/tmp/xdg-cache; mkdir -p \"$HOME\" \"$TMPDIR\" \"$TRITON_CACHE_DIR\" \"$TORCHINDUCTOR_CACHE_DIR\" \"$XDG_CACHE_HOME\"; export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64; mkdir -p /mnt/data/wangruisi/eas; LOG=/mnt/data/wangruisi/eas/glm53-serve.log; { echo \"=== start $(date -Is) host=$(hostname)\"; echo \"LD_LIBRARY_PATH=$LD_LIBRARY_PATH\"; echo \"--- cuda probe\"; python3 -c \"import torch; print('\"'\"'devices'\"'\"', torch.cuda.device_count(), '\"'\"'available'\"'\"', torch.cuda.is_available(), '\"'\"'name'\"'\"', torch.cuda.get_device_name(0) if torch.cuda.is_available() else '\"'\"'-'\"'\"')\" 2>&1 | tail -5; echo \"--- launching\"; export PYTHONPATH=/opt/sglang/python PYTHONUNBUFFERED=1; python3 -m sglang.launch_server --model-path /mnt/data/public_data/public_model/GLM5.3/GLM-5.3-Flash --served-model-name glm-5.3-flash --host 0.0.0.0 --port 8000 --tp-size 8 --attention-backend dsa --dsa-prefill-backend tilelang --dsa-decode-backend tilelang --linear-attn-backend triton --kv-cache-dtype bfloat16 --quantization fp8 --moe-runner-backend triton --mem-fraction-static 0.78 --max-running-requests 64 --chunked-prefill-size 8192 --max-prefill-tokens 8192 --disable-prefill-cuda-graph --reasoning-parser glm45 --tool-call-parser glm47 --trust-remote-code --speculative-algorithm EAGLE --speculative-num-steps 5 --speculative-eagle-topk 1 --speculative-num-draft-tokens 6; echo \"=== exit code $?\"; } 2>&1 | tee -a \"$LOG\"'",
+      "health_check": {
+        "failure_threshold": 60,
+        "http_get": {
+          "path": "/health",
+          "port": 8000
+        },
+        "initial_delay_seconds": 480,
+        "period_seconds": 30,
+        "success_threshold": 1,
+        "timeout_seconds": 10
+      },
+      "startup_check": {
+        "failure_threshold": 60,
+        "http_get": {
+          "path": "/health",
+          "port": 8000
+        },
+        "initial_delay_seconds": 60,
+        "period_seconds": 30,
+        "success_threshold": 1,
+        "timeout_seconds": 10
+      }
+    }
+  ],
+  "labels": {
+    "scope": "edlsfrtr",
+    "owner": "REPLACE_WITH_OWNER",
+    "purpose": "glm53-flash-endpoint"
+  },
+  "metadata": {
+    "cpu": 128,
+    "disk": "30Gi",
+    "gpu": 8,
+    "instance": 1,
+    "memory": 1500000,
+    "name": "ef_glm53_flash_1node",
+    "quota_id": "REPLACE_WITH_LINGJUN_QUOTA_ID",
+    "quota_type": "Lingjun",
+    "resource_burstable": false,
+    "workspace_id": "REPLACE_WITH_WORKSPACE_ID"
+  },
+  "options": {
+    "priority": 5
+  },
+  "storage": [
+    {
+      "cpfs": {
+        "file_system_id": "REPLACE_WITH_CPFS_FILE_SYSTEM_ID",
+        "path": "/mnt/cpfs/"
+      },
+      "mount_path": "/mnt/data/"
+    }
+  ]
+}

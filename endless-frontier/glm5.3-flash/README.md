@@ -21,8 +21,9 @@ GLM-5.3-Flash 在**单机 8 卡 H100 级别（sm90）**上的可复现启动配�
 | 组件 | 值 |
 |---|---|
 | 节点 | 8 × `L20Z`（H100 级别，80 GiB/卡，计算能力 (9,0)=sm90） |
-| 镜像 | 含 SGLang 0.5.18 / torch 2.13.0+cu130 / sglang-kernel 0.4.7 / flashinfer 0.6.18 的 CUDA 13.0 镜像 |
-| 源码树 | `dev` 分支的仓库源码，需含 `python/sglang/srt/models/glm5_next.py` |
+| 镜像（自有，已实测） | `wangruisi/sglang-glm53-flash:sglang-d6221be-glm53-flash-l20z-1node-20261003-1a4d8b6`，digest `sha256:87ed176b…`；源码与依赖都在镜像里，见 [`image/`](image/README.md) |
+| 镜像（团队既有，也验证过） | 含 SGLang 0.5.18 / torch 2.13.0+cu130 / sglang-kernel 0.4.7 / flashinfer 0.6.18 的 CUDA 13.0 镜像 |
+| 源码树 | 自有镜像里是 `/opt/sglang/python`（提交 `d6221bec2`）；用团队镜像时需外挂含 `glm5_next` 的源码树 |
 | 模型目录 | `/mnt/data/public_data/public_model/GLM5.3/GLM-5.3-Flash` |
 
 **镜像自带的 SGLang 早于 GLM-5.3，没有 `glm5_next`**：直接用镜像内源码会在启动时报
@@ -78,8 +79,19 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health)"
 4. 日志里 `Load weight end`、`The server is fired up and ready to roll!` 都出现。
 5. 提交/启动过程不落地任何 AccessKey、receipt、真实集群 ID（参见仓库根目录的仓库卫生约定）。
 
+## 两条交付路线
+
+| 路线 | 目录 | 状态 |
+|---|---|---|
+| 自有镜像（推荐） | [`image/`](image/README.md) | 已实测：源码与依赖都在镜像里，作业/服务只需 `PYTHONPATH=/opt/sglang/python` |
+| 单机 DLC 作业 | [`h100/`](h100/deploy_glm53_flash_1m.sh) + [`aliyun_h100_1node/`](aliyun_h100_1node/README.md) | 已实测：提交、启动、内容校验都跑通 |
+| EAS 在线服务（对外入口） | [`eas/`](eas/README.md) | 已实测：公网入口 `/health` 200，`pong` 1.2 s，长请求 34.8 s |
+
+三条路线用的是同一套启动参数（本文下面列的那些），区别只在“怎么起”和“谁能访问”。
+
 ## 待办
 
-- **我们自己的镜像**：目前依赖团队既有镜像，正在构建每模型一份的自有镜像（CUDA 13.0 devel + 仓库源码 + 固定版本依赖）。
-- **对外暴露**：EAS 转发（同 VPC）尚未接；当前只有集群内可达的 `8000`。
 - **PD 分离 / 多机**：单机稳定后再评估，参考同仓库 Qwen3.8 的 2P2D 配方。
+- **Qwen3.8-Flash-Next 的 EAS 入口**：同一镜像与同一存储段，换启动参数与端口即可；其 1M 上下文需要
+  `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1`（该检查点的 YaRN 在 `text_config` 里）。
+- **长上下文（300k–1M）与并发/吞吐**：尚未实测，不要把官方数字当成本节点的数字。
