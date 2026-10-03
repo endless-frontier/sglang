@@ -146,8 +146,9 @@ def main() -> int:
 
     if ready and SMOKE:
         request("short", "Reply with exactly: pong")
-        filler = "The quick brown fox jumps over the lazy dog. " * 380
-        request("long16k", filler + " Now reply with exactly: longpong")
+        filler = "The quick brown fox jumps over the lazy dog. " * 1600
+        log(f"smoke long prompt: {len(filler)} chars (~16k tokens expected)")
+            request("long16k", filler + " Now reply with exactly: longpong")
     elif not ready:
         log("NOT-READY")
 

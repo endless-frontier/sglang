@@ -1,7 +1,8 @@
 # GLM-5.3-Flash 部署配方（单机 8 卡）
 
 GLM-5.3-Flash 在**单机 8 卡 H100 级别（sm90）**上的可复现启动配方。已在该硬件上实测：
-服务正常起、短请求与 16k 长请求都能正常返回，实测数字见 [`RESULTS.md`](RESULTS.md)。
+服务正常起、短请求与 ~3.8k token 长请求都能正常返回，实测数字见 [`RESULTS.md`](RESULTS.md)。
+**尚未实测：≥16k token 单请求**（早期脚本把 ~3.8k 的请求错标为 `long16k`，已纠正；下一次运行会真正打到 ~16k）。
 
 ## 模型要点
 
@@ -91,6 +92,7 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health)"
 
 ## 待办
 
+- **≥16k token 单请求**：交付验收要求，尚未实测（当前最长 ~3.8k token）。
 - **PD 分离 / 多机**：单机稳定后再评估，参考同仓库 Qwen3.8 的 2P2D 配方。
 - **Qwen3.8-Flash-Next 的 EAS 入口**：同一镜像与同一存储段，换启动参数与端口即可；其 1M 上下文需要
   `SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1`（该检查点的 YaRN 在 `text_config` 里）。
