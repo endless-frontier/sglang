@@ -30,7 +30,7 @@ NETWORK = {
     "vpc_id": "REPLACE_WITH_VPC_ID",
     "vswitch_id": "REPLACE_WITH_VSWITCH_ID",
 }
-MODEL_DIR = "/mnt/data/wangruisi/models/Qwen3.8-2.4T-A95B-FP8"
+MODEL_DIR = "/mnt/data/<你的目录>/models/Qwen3.8-2.4T-A95B-FP8"
 NAME = "ef_qwen38_24t_a95b"
 # machines per replica: the H200 recipe uses 4 nodes of 141 GB; ours are 80 GB, so the same weight
 # set and comparable headroom need 6 (3.84 TB) — see the recipe evidence for the arithmetic
@@ -52,8 +52,8 @@ SCRIPT = (
     "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor XDG_CACHE_HOME=/tmp/xdg-cache; "
     "mkdir -p \"$HOME\" \"$TMPDIR\" \"$TRITON_CACHE_DIR\" \"$TORCHINDUCTOR_CACHE_DIR\" \"$XDG_CACHE_HOME\"; "
     "export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64; "
-    "mkdir -p /mnt/data/wangruisi/eas; "
-    "LOG=/mnt/data/wangruisi/eas/qwen38-24t-$(hostname).log; "
+    "mkdir -p /mnt/data/<你的目录>/eas; "
+    "LOG=/mnt/data/<你的目录>/eas/qwen38-24t-$(hostname).log; "
     "{ echo \"=== start $(date -Is) host=$(hostname)\"; "
     "echo \"--- injected contract ---\"; "
     "for v in RANK_ID COMM_IFNAME RANK_IP MASTER_ADDRESS; do eval \"echo $v=\\${$v:-MISSING}\"; done; "

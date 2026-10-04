@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# The container start command for this model, standalone so it can be read and tested.
-# EAS runs this as `script` in the service definition; run it by hand only for debugging.
+# 本模型容器的启动命令，单独放出来方便阅读与本地调试。
+# EAS 会把本文件内容作为服务定义里的 script 执行；手工运行仅用于排障。
 #
-#   deploy_qwen38_24t_a95b_6node.sh
+#   deploy_6node.sh
 #
-# The platform injects, per instance of a distributed service:
-#   RANK_ID        instance number inside the unit (0..size-1)
-#   COMM_IFNAME    the NIC reserved for inter-node traffic (net0 with RDMA, else eth1)
-#   RANK_IP        that NIC's IP
-#   MASTER_ADDRESS rank 0's IP  -> the rendezvous address for the engine
-set -uo pipefail
+# 平台会为分布式单元的每个实例注入：
+#   RANK_ID        实例编号（0..size-1）
+#   COMM_IFNAME    组网网卡（开 RDMA 为 net0，否则 eth1）
+#   RANK_IP        该网卡 IP
+#   MASTER_ADDRESS 0 号实例 IP -> 引擎的 rendezvous 地址
 
-MODEL_DIR=${MODEL_DIR:-/mnt/data/wangruisi/models/Qwen3.8-2.4T-A95B-FP8}
+MODEL_DIR=${MODEL_DIR:-/mnt/data/<你的目录>/models/Qwen3.8-2.4T-A95B-FP8}
 MACHINES=${MACHINES:-6}
-LOG=${LOG:-/mnt/data/wangruisi/eas/qwen38-24t-$(hostname).log}
+LOG=${LOG:-/mnt/data/<你的目录>/eas/qwen38-24t-$(hostname).log}
 
 mkdir -p "$(dirname "$LOG")" /tmp/eas-home /tmp/eas-tmp /tmp/triton-cache /tmp/torchinductor /tmp/xdg-cache
 export HOME=/tmp/eas-home TMPDIR=/tmp/eas-tmp TRITON_CACHE_DIR=/tmp/triton-cache \
@@ -27,12 +26,11 @@ export PYTHONPATH=/opt/sglang/python PYTHONUNBUFFERED=1
   echo "--- injected contract ---"
   for v in RANK_ID COMM_IFNAME RANK_IP MASTER_ADDRESS; do eval "echo $v=\${$v:-MISSING}"; done
   if [ -z "${RANK_ID:-}" ] || [ -z "${MASTER_ADDRESS:-}" ]; then
-    echo "CONTRACT-MISSING: refusing to load 2.45 TB without a rank and a rendezvous address"
+    echo "CONTRACT-MISSING: 没有 rank 与 rendezvous 地址，拒绝加载 2.45 TB 权重"
     echo "--- environment (filtered) ---"; env | sort | grep -iE "rank|master|comm|world|node|nccl" || true
     exit 42
   fi
-  # The flag set is the SGLang cookbook's verified cell for this model, with the pipeline
-  # dimension carrying our machine count (the cookbook's own cell uses four 141 GB nodes).
+  # 参数取自 SGLang 官方 cookbook 对本模型的验证配置，把流水线维度的 4 台改成我们的机器数。
   exec python3 -m sglang.launch_server \
     --model-path "$MODEL_DIR" \
     --served-model-name qwen3.8-2.4t-a95b \
