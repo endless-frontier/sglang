@@ -15,6 +15,10 @@ Flash Next（`model_type=qwen4_exp`）在 H200 上的部署配方：原生 262,1
 | `qwen3.8-next-flash/aliyun_h200_2p2d` | 阿里云 DLC，4 节点 × 8 GPU + EAS 公网转发 | `deployment/qwen38_flash_next_h200/cli.py` | 生产交付、对外提供 OpenAI 兼容 Endpoint |
 | `glm5.3-flash/h100` | 单机 8 GPU（H100 级别，sm90） | `deploy_glm53_flash_1m.sh` | GLM-5.3-Flash 单机验证与起服务 |
 | `glm5.3-flash/aliyun_h100_1node` | 阿里云 DLC，单节点 8 GPU | `submit_glm53_flash.py` | GLM-5.3-Flash 在 PAI 上起服务 |
+| `qwen3.8-2.4t-a95b/eas_6node` | 阿里云 **EAS 多机分布式**：单实例跨 **6 节点 × 8 GPU = 48 卡** | `manage_service.py` | **Qwen3.8 2.4T 旗舰**（`Qwen3_5MoeForCausalLM`，≠ Flash Next）对外提供 OpenAI 兼容 Endpoint |
+
+> `qwen3.8-2.4t-a95b` 是**另一个模型**：2.4T 旗舰约 2.45 TB FP8 权重，一台机器放不下，
+> 需要 EAS 多机分布式（`"unit": {"size": 6}`）；而 `qwen3.8-next-flash` 约 180B、单机 8 卡可跑。
 
 三套方案共用同一套模型/YaRN 配置、同一组 parser（`qwen3` / `qwen3_coder`）和
 同一套 PD 参数（TP8、Mooncake、Router 限流 200/200/600）。
@@ -32,6 +36,9 @@ Flash Next（`model_type=qwen4_exp`）在 H200 上的部署配方：原生 262,1
 - `glm5.3-flash/README.md`：**GLM-5.3-Flash 单机配方**——模型要点、DSA/KDA 后端选择、
   三个坑（镜像自带 SGLang 太老 / `fa3` 会在图捕获阶段崩 / DLC 命令必须单行无引号）、验证清单。
   实测数字见 `glm5.3-flash/RESULTS.md`。
+- `qwen3.8-2.4t-a95b/README.md`：**Qwen3.8 2.4T 旗舰配方**——与 Flash Next 的区别、
+  48 卡形态的算术、EAS 多机部署（自定义镜像如何接平台注入的 rank 变量）、
+  实测数字（含 240k token 长上下文取证）与六个实战踩坑。
 
 ## 通用环境
 
