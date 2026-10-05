@@ -16,6 +16,7 @@ multi-machine contract (see ../../../context/serving-design-rules.md):
   --describe  current state
   --delete    delete it
 """
+
 import argparse
 import json
 from pathlib import Path
@@ -50,17 +51,17 @@ SCRIPT = (
     "bash -c 'set -uo pipefail; "
     "export HOME=/tmp/eas-home TMPDIR=/tmp/eas-tmp TRITON_CACHE_DIR=/tmp/triton-cache "
     "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor XDG_CACHE_HOME=/tmp/xdg-cache; "
-    "mkdir -p \"$HOME\" \"$TMPDIR\" \"$TRITON_CACHE_DIR\" \"$TORCHINDUCTOR_CACHE_DIR\" \"$XDG_CACHE_HOME\"; "
+    'mkdir -p "$HOME" "$TMPDIR" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$XDG_CACHE_HOME"; '
     "export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64; "
     "mkdir -p /mnt/data/<你的目录>/eas; "
     "LOG=/mnt/data/<你的目录>/eas/qwen38-24t-$(hostname).log; "
-    "{ echo \"=== start $(date -Is) host=$(hostname)\"; "
-    "echo \"--- injected contract ---\"; "
-    "for v in RANK_ID COMM_IFNAME RANK_IP MASTER_ADDRESS; do eval \"echo $v=\\${$v:-MISSING}\"; done; "
-    "echo \"--- fail fast rather than load 2.45 TB blind ---\"; "
-    "if [ -z \"${RANK_ID:-}\" ] || [ -z \"${MASTER_ADDRESS:-}\" ]; then "
-    "  echo \"CONTRACT-MISSING: EAS did not inject RANK_ID/MASTER_ADDRESS into this custom image\"; "
-    "  echo \"--- environment (filtered) ---\"; env | sort | grep -iE \"rank|master|comm|world|node|nccl\" || true; "
+    '{ echo "=== start $(date -Is) host=$(hostname)"; '
+    'echo "--- injected contract ---"; '
+    'for v in RANK_ID COMM_IFNAME RANK_IP MASTER_ADDRESS; do eval "echo $v=\\${$v:-MISSING}"; done; '
+    'echo "--- fail fast rather than load 2.45 TB blind ---"; '
+    'if [ -z "${RANK_ID:-}" ] || [ -z "${MASTER_ADDRESS:-}" ]; then '
+    '  echo "CONTRACT-MISSING: EAS did not inject RANK_ID/MASTER_ADDRESS into this custom image"; '
+    '  echo "--- environment (filtered) ---"; env | sort | grep -iE "rank|master|comm|world|node|nccl" || true; '
     "  exit 42; fi; "
     "export NCCL_SOCKET_IFNAME=${COMM_IFNAME:-net0} GLOO_SOCKET_IFNAME=${COMM_IFNAME:-net0}; "
     "python3 -c \"import torch; print('devices', torch.cuda.device_count(), 'available', torch.cuda.is_available())\" 2>&1 | tail -2; "
@@ -70,7 +71,8 @@ SCRIPT = (
     "--served-model-name qwen3.8-2.4t-a95b "
     "--nnodes " + str(MACHINES) + " --node-rank ${RANK_ID:-0} "
     "--dist-init-addr ${MASTER_ADDRESS}:20000 "
-    + SGLANG_FLAGS + "; } 2>&1 | tee -a \"$LOG\"'"
+    + SGLANG_FLAGS
+    + '; } 2>&1 | tee -a "$LOG"\''
 )
 
 
@@ -85,7 +87,7 @@ def body() -> dict:
                 "health_check": {
                     "failure_threshold": 120,
                     "http_get": {"path": "/health", "port": 8000},
-                    "initial_delay_seconds": 3600,   # a 2.45 TB load is not a warm-up
+                    "initial_delay_seconds": 3600,  # a 2.45 TB load is not a warm-up
                     "period_seconds": 30,
                     "success_threshold": 1,
                     "timeout_seconds": 10,
@@ -121,7 +123,10 @@ def body() -> dict:
         "unit": {"size": MACHINES},
         "options": {"priority": 5},
         "storage": [
-            {"cpfs": {"file_system_id": CPFS_FS, "path": "/mnt/cpfs/"}, "mount_path": "/mnt/data/"}
+            {
+                "cpfs": {"file_system_id": CPFS_FS, "path": "/mnt/cpfs/"},
+                "mount_path": "/mnt/data/",
+            }
         ],
     }
 
@@ -176,9 +181,23 @@ def main() -> int:
         print("create:", r.get("ServiceName"), r.get("Status"))
     if args.describe or args.apply or args.update:
         b = c.describe_service(REGION, NAME).body.to_map()
-        keys = ("ServiceName", "Status", "TotalInstance", "RunningInstance", "Gpu", "Cpu",
-                "Message", "InternetEndpoint", "QuotaId", "UpdateTime")
-        print(json.dumps({k: b.get(k) for k in keys if k in b}, ensure_ascii=False, indent=1)[:900])
+        keys = (
+            "ServiceName",
+            "Status",
+            "TotalInstance",
+            "RunningInstance",
+            "Gpu",
+            "Cpu",
+            "Message",
+            "InternetEndpoint",
+            "QuotaId",
+            "UpdateTime",
+        )
+        print(
+            json.dumps(
+                {k: b.get(k) for k in keys if k in b}, ensure_ascii=False, indent=1
+            )[:900]
+        )
     if args.update:
         from alibabacloud_eas20210701 import models as eas
 

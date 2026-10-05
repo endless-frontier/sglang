@@ -24,7 +24,8 @@ from pathlib import Path
 
 SRC = os.environ.get("QWEN38_SGLANG_SOURCE", "/opt/sglang/python")
 MODEL = os.environ.get(
-    "QWEN38_MODEL_PATH", "/mnt/data/public_data/public_model/Qwen3.8/Qwen3.8-Flash-Next-1M"
+    "QWEN38_MODEL_PATH",
+    "/mnt/data/public_data/public_model/Qwen3.8/Qwen3.8-Flash-Next-1M",
 )
 SERVED = os.environ.get("QWEN38_SERVED_NAME", "qwen38-flash-next-1m")
 PORT = os.environ.get("QWEN38_PORT", "40000")
@@ -37,23 +38,36 @@ LOG = Path("/tmp/qwen38_server.log")
 RES = Path("/tmp/qwen38_resources.log")
 
 ARGS = [
-    "--model-path", MODEL,
-    "--served-model-name", SERVED,
-    "--host", "0.0.0.0",
-    "--port", PORT,
-    "--tp-size", TP_SIZE,
+    "--model-path",
+    MODEL,
+    "--served-model-name",
+    SERVED,
+    "--host",
+    "0.0.0.0",
+    "--port",
+    PORT,
+    "--tp-size",
+    TP_SIZE,
     "--trust-remote-code",
-    "--context-length", "1048576",
-    "--mem-fraction-static", MEM_FRACTION,
-    "--cuda-graph-max-bs-decode", "32",
-    "--max-running-requests", "96",
+    "--context-length",
+    "1048576",
+    "--mem-fraction-static",
+    MEM_FRACTION,
+    "--cuda-graph-max-bs-decode",
+    "32",
+    "--max-running-requests",
+    "96",
 ]
 if SPECULATIVE:
     ARGS += [
-        "--speculative-algorithm", "NEXTN",
-        "--speculative-num-steps", "3",
-        "--speculative-eagle-topk", "1",
-        "--speculative-num-draft-tokens", "4",
+        "--speculative-algorithm",
+        "NEXTN",
+        "--speculative-num-steps",
+        "3",
+        "--speculative-eagle-topk",
+        "1",
+        "--speculative-num-draft-tokens",
+        "4",
     ]
 
 
@@ -73,10 +87,20 @@ def host_memory() -> str:
 
 def gpu_state() -> str:
     try:
-        rows = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=20,
-        ).stdout.strip().splitlines()
+        rows = (
+            subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,utilization.gpu,memory.used",
+                    "--format=csv,noheader",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            .stdout.strip()
+            .splitlines()
+        )
     except Exception as exc:  # noqa: BLE001
         return f"gpu-query-error {exc}"
     util = [row.split(",")[1].strip().replace(" %", "") for row in rows]
@@ -108,14 +132,17 @@ def tail(path: Path, count: int) -> str:
 
 
 def request(label: str, content: str, max_tokens: int = 256) -> None:
-    body = json.dumps({
-        "model": SERVED,
-        "messages": [{"role": "user", "content": content}],
-        "max_tokens": max_tokens,
-        "temperature": 0,
-    }).encode()
+    body = json.dumps(
+        {
+            "model": SERVED,
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0,
+        }
+    ).encode()
     req = urllib.request.Request(
-        f"{URL}/v1/chat/completions", data=body,
+        f"{URL}/v1/chat/completions",
+        data=body,
         headers={"Content-Type": "application/json"},
     )
     started = time.time()
@@ -123,8 +150,10 @@ def request(label: str, content: str, max_tokens: int = 256) -> None:
         data = json.loads(urllib.request.urlopen(req, timeout=1800).read().decode())
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
-        log(f"RESULT {label} elapsed={time.time() - started:.1f}s "
-            f"finish={choice.get('finish_reason')}")
+        log(
+            f"RESULT {label} elapsed={time.time() - started:.1f}s "
+            f"finish={choice.get('finish_reason')}"
+        )
         log(f"  content={(message.get('content') or '')[:300]!r}")
         log(f"  usage={data.get('usage')}")
     except Exception as exc:  # noqa: BLE001
@@ -152,7 +181,10 @@ def main() -> int:
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "sglang.launch_server", *ARGS],
-        stdout=LOG.open("w"), stderr=subprocess.STDOUT, env=env, start_new_session=True,
+        stdout=LOG.open("w"),
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
     )
     log(f"launched pid={proc.pid}")
 
@@ -161,8 +193,10 @@ def main() -> int:
         time.sleep(15)
         code = health()
         alive = proc.poll() is None
-        log(f"[tick {tick}] {time.strftime('%H:%M:%S')} health={code} alive={alive} "
-            f"{host_memory()} {gpu_state()}")
+        log(
+            f"[tick {tick}] {time.strftime('%H:%M:%S')} health={code} alive={alive} "
+            f"{host_memory()} {gpu_state()}"
+        )
         if tick % 4 == 0:
             log("  srv: " + " | ".join(tail(LOG, 4).splitlines()[-4:])[:700])
         if code == 200:

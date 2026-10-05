@@ -43,7 +43,9 @@ def load_config(path: Path) -> dict:
 
 def user_command() -> str:
     payload = base64.b64encode(ENTRY.read_bytes()).decode()
-    return f"echo {payload} | base64 -d > /tmp/job_entry.py; python3 -u /tmp/job_entry.py"
+    return (
+        f"echo {payload} | base64 -d > /tmp/job_entry.py; python3 -u /tmp/job_entry.py"
+    )
 
 
 def build_request(config: dict, run_id: str) -> dict:
@@ -85,7 +87,9 @@ def build_request(config: dict, run_id: str) -> dict:
             "PYTHONPATH": f"{runtime['sglang_source']}/python",
             "QWEN38_SGLANG_SOURCE": runtime["sglang_source"],
             "QWEN38_MODEL_PATH": runtime["model_path"],
-            "QWEN38_SERVED_NAME": runtime.get("served_model_name", "qwen38-flash-next-1m"),
+            "QWEN38_SERVED_NAME": runtime.get(
+                "served_model_name", "qwen38-flash-next-1m"
+            ),
             "QWEN38_PORT": str(runtime.get("port", 40000)),
             "QWEN38_TP_SIZE": str(runtime.get("tp_size", 8)),
             "QWEN38_MEM_FRACTION": str(runtime.get("mem_fraction_static", 0.90)),
@@ -93,7 +97,9 @@ def build_request(config: dict, run_id: str) -> dict:
             "QWEN38_SMOKE": str(runtime.get("smoke", 1)),
         },
         "UserCommand": user_command(),
-        "JobMaxRunningTimeMinutes": int(aliyun.get("job_max_running_time_minutes", 120)),
+        "JobMaxRunningTimeMinutes": int(
+            aliyun.get("job_max_running_time_minutes", 120)
+        ),
     }
 
 
@@ -102,7 +108,9 @@ def client(config: dict):
     from alibabacloud_tea_openapi import models as open_api_models
 
     if not os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID"):
-        sys.exit("缺少环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+        sys.exit(
+            "缺少环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+        )
     return Dlc(
         open_api_models.Config(
             access_key_id=os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
@@ -119,7 +127,7 @@ def tail_logs(dlc, job_id: str, max_lines: int = 120) -> None:
     body = dlc.get_job(job_id, dlc_models.GetJobRequest()).body
     print(f"status={body.status}")
     lines: list[str] = []
-    for pod in (body.pods or []):
+    for pod in body.pods or []:
         pod_id = str(getattr(pod, "pod_id", "") or "")
         if not pod_id:
             continue
@@ -135,8 +143,12 @@ def tail_logs(dlc, job_id: str, max_lines: int = 120) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("render", "submit", "status", "stop", "watch"))
-    parser.add_argument("--config", default=str(HERE / "configs" / "qwen38_flash_next_h100_1node.json"))
+    parser.add_argument(
+        "action", choices=("render", "submit", "status", "stop", "watch")
+    )
+    parser.add_argument(
+        "--config", default=str(HERE / "configs" / "qwen38_flash_next_h100_1node.json")
+    )
     parser.add_argument("--job-id")
     parser.add_argument("--apply", action="store_true", help="真正提交/停止")
     parser.add_argument("--interval", type=int, default=60)
@@ -157,10 +169,16 @@ def main() -> int:
         from alibabacloud_pai_dlc20201203 import models as dlc_models
 
         dlc = client(config)
-        job_id = dlc.create_job(dlc_models.CreateJobRequest().from_map(request)).body.job_id
+        job_id = dlc.create_job(
+            dlc_models.CreateJobRequest().from_map(request)
+        ).body.job_id
         print(f"submitted job: {job_id}")
     else:
-        config = load_config(Path(args.config)) if Path(args.config).exists() else {"aliyun": {}}
+        config = (
+            load_config(Path(args.config))
+            if Path(args.config).exists()
+            else {"aliyun": {}}
+        )
         dlc = client(config) if config["aliyun"] else None
         job_id = args.job_id
         if dlc is None:
@@ -179,7 +197,11 @@ def main() -> int:
         while True:
             body = dlc.get_job(job_id, dlc_models.GetJobRequest()).body
             print(f"[{time.strftime('%H:%M:%S')}] status={body.status}")
-            if args.action == "status" or body.status in ("Succeeded", "Failed", "Stopped"):
+            if args.action == "status" or body.status in (
+                "Succeeded",
+                "Failed",
+                "Stopped",
+            ):
                 tail_logs(dlc, job_id)
                 break
             time.sleep(args.interval)
