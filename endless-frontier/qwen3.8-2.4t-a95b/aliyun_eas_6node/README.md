@@ -1,8 +1,16 @@
 # EAS 多机分布式服务：6 台 × 8 卡（TP8 × PP6，48 卡）
-
 **实测通过（2026-10-04）**：一个模型实例跨 6 台 H100 级机器，公网入口可调用，
 240k token 的长上下文请求两个暗号都答对。这是 2.4T 模型在本集群唯一可行的服务形态 ——
 单节点装不下它。
+
+## 需要准备什么
+
+| 项 | 要求 |
+| --- | --- |
+| 权重 | `Qwen/Qwen3.8-2.4T-A95B-FP8`，revision `d2dc3565`，**224 个文件 / 2.496 TB**；放在 EAS 能挂载的存储上（CPFS 挂到容器 `/mnt/data` 即可，本配方即如此，权重原地读取、不拷副本） |
+| 权重校验 | 发布方为每个分片提供 sha256（213 个分片）；下载后逐个核对再上线 |
+| 镜像 | 可直接用 README 里给出的已实测镜像；或自行重建 |
+| 配额与网络 | 灵骏配额（可一次排 6 个 8 卡节点）+ 与 EAS 同 VPC/vSwitch/安全组；开 RDMA |
 
 ## 目录内容
 
@@ -16,8 +24,7 @@
 
 ```bash
 # 1) 先填模板里的占位符：镜像、VPC、vSwitch、安全组、灵骏配额、工作空间
-#    （真实值不要提交，命令行的凭据从 ~/.aliyun-ef.env 读）
-python3 manage_service.py --dry-run        # 打印将要提交的服务定义
+#    （真实值不要提交，命令行的凭据从 ~/.aliyun-ef.env 读）python3 manage_service.py --dry-run        # 打印将要提交的服务定义
 python3 manage_service.py --apply          # 创建服务（申请 48 卡，通常要排队）
 python3 manage_service.py --describe       # 状态 / 运行实例数 / 公网入口
 python3 manage_service.py --delete         # 删除，释放 48 卡

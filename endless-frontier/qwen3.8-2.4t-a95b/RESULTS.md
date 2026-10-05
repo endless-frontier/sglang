@@ -32,7 +32,7 @@
 
 | | |
 | --- | --- |
-| 镜像 | `sglang-main0e6d7eb-qwen38-24t-a95b-h100-eas-20261004`，digest `sha256:9478bff4fcb257418e7ee7a6e5eba572eddc58e4f9e501e81f10a93289ef1d35`（8.86 GB 压缩 / 18 GB 解压） |
+| 镜像 | `sglang-main0e6d7eb-qwen38-24t-a95b-h100-eas-20261004`，digest `sha256:9478bff4fcb257418e7ee7a6e5eba572eddc58e4f9e501e81f10a93289ef1d35`（8.86 GB 压缩 / 18 GB 解压）；完整地址见 README |
 | SGLang 源码 | `sgl-project/sglang` @ `0e6d7eba5f16ff3e35e58622a72bf0c36bafde63`（main，官方模型卡指向的 day‑0 构建） |
 | 权重 | `Qwen/Qwen3.8-2.4T-A95B-FP8` revision `d2dc3565`，224 个文件、2.496 TB；213 个分片的 sha256 全部校验通过 |
 | 并行形态日志 | `nnodes 6 · node_rank 0–5 · tp_size 8 · pp_size 6 · dist_init_addr :20000`，NCCL 走 RDMA（`NET/IB/…/GDRDMA`） |

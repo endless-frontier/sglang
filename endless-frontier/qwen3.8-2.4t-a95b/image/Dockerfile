@@ -1,7 +1,7 @@
 # Qwen3.8-2.4T-A95B serving image
 #
-# Derived 2026-10-03 from the proven GLM-5.3-flash image recipe (ef-pai-serving/glm-5.3-flash/Dockerfile),
-# which is the authority for *why* each piece is here — base choice, CUDA devel toolkit, the two
+# Derived from a proven recipe for the sibling GLM-5.3-flash model, which is the authority for
+# *why* each piece is here — base choice, CUDA devel toolkit, the two
 # libcuda symlinks, python3-dev, and uv-instead-of-pip. The differences are exactly two:
 #
 #   1. the SGLang pin: sgl-project/sglang **v0.5.21** (2026-10-02) instead of the team's fork at

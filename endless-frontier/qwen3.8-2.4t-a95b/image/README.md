@@ -15,5 +15,7 @@
 3. **构建期断言架构**：最后一层会检查 `Qwen3_5MoeForCausalLM` 与其 `EntryClass` 确实存在，
    并验证 `Python.h` 与 `-l:libcuda.so.1` 可解析 —— 把"pin 错了"变成构建失败，而不是上线后莫名其妙的加载失败。
 
-依赖的完整冻结清单（217 个包，含 torch / flashinfer / triton / tilelang 的精确版本）在
-本目录仓库的 `qwen-3.8-2.4t-a95b/image.lock.freeze.txt`（私有仓库 `ef-pai-serving`）。
+依赖的完整冻结清单（217 个包）可以直接从构建好的镜像里重新导出：
+`podman run --rm <镜像> bash -lc "uv pip freeze --system"`。
+关键版本：torch `2.13.0+cu130`、flashinfer-python `0.7.0.post1`、triton `3.7.1`、
+transformers `5.17.0`、tilelang `0.1.12`、sglang-kernel `0.4.8`、numpy `2.3.5`。

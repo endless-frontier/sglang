@@ -101,10 +101,9 @@ def body() -> dict:
             }
         ],
         "labels": {
-            "scope": "edlsfrtr",
-            "parent": "qwen38-24t-serving",
-            "owner": "wangruisi",
-            "purpose": "qwen38-24t-a95b-serving",
+            "project": "qwen3.8-2.4t-a95b",
+            "owner": "REPLACE_WITH_OWNER",
+            "purpose": "serving",
         },
         "metadata": {
             "cpu": 128,

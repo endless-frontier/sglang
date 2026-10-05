@@ -10,13 +10,22 @@
 
 | 场景 | 目录 | 机器 | 状态 |
 | --- | --- | --- | --- |
-| **EAS 多机在线服务（推荐）** | [`eas_6node/`](eas_6node/README.md) | **6 × 8 卡 H100 级 = 48 卡** | **已实测通过**（2026-10-04） |
+| **EAS 多机在线服务（推荐）** | [`aliyun_eas_6node/`](aliyun_eas_6node/README.md) | **6 × 8 卡 H100 级 = 48 卡** | **已实测通过**（2026-10-04） |
 | 镜像构建 | [`image/`](image/README.md) | 任意带容器运行时的机器 | 已实测（18 GB 镜像） |
 | 实测数据 | [`RESULTS.md`](RESULTS.md) | — | — |
 
+## 直接可用的镜像（已实测）
+
+```text
+dptech-sh-pai-acr-registry.cn-shanghai.cr.aliyuncs.com/dptech-namespace/wangruisi/sglang-qwen38-24t-a95b:sglang-main0e6d7eb-qwen38-24t-a95b-h100-eas-20261004
+digest sha256:9478bff4fcb257418e7ee7a6e5eba572eddc58e4f9e501e81f10a93289ef1d35
+```
+
+EAS 侧必须用**公网**域名拉取（`-vpc` 形式在服务侧拉不动）；想自己重建就用 [`image/`](image/README.md) 里的 Dockerfile。
+
 ## 30 秒决策
 
-- **要一个在线服务地址？** → 进 [`eas_6node/`](eas_6node/README.md)：填占位符，`--apply` 创建，
+- **要一个在线服务地址？** → 进 [`aliyun_eas_6node/`](aliyun_eas_6node/README.md)：填占位符，`--apply` 创建，
   `--delete` 收工。记住它是 **48 张卡**，验证完就删。
 - **要自己重建镜像？** → 进 [`image/`](image/README.md)。
 - **想了解这个模型和 next-flash 的区别、以及实测出来的行为？** → 直接看 [`RESULTS.md`](RESULTS.md)。
