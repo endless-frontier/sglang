@@ -35,20 +35,25 @@ def client() -> Eas:
         if "=" in line and not line.startswith("#"):
             key, value = line.split("=", 1)
             creds[key.strip()] = value.strip()
-    return Eas(om.Config(
-        access_key_id=creds["ALIBABA_CLOUD_ACCESS_KEY_ID"],
-        access_key_secret=creds["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
-        endpoint=f"eas.{REGION}.aliyuncs.com",
-        region_id=REGION,
-        connect_timeout=20000,
-        read_timeout=120000,
-    ))
+    return Eas(
+        om.Config(
+            access_key_id=creds["ALIBABA_CLOUD_ACCESS_KEY_ID"],
+            access_key_secret=creds["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+            endpoint=f"eas.{REGION}.aliyuncs.com",
+            region_id=REGION,
+            connect_timeout=20000,
+            read_timeout=120000,
+        )
+    )
 
 
 def find(eas_client: Eas, name: str) -> dict:
-    services = eas_client.list_services(
-        eas.ListServicesRequest(page_size=100, page_number=1)
-    ).body.to_map().get("Services") or []
+    services = (
+        eas_client.list_services(eas.ListServicesRequest(page_size=100, page_number=1))
+        .body.to_map()
+        .get("Services")
+        or []
+    )
     for service in services:
         if service.get("ServiceName") == name:
             return service
@@ -94,9 +99,21 @@ def main() -> int:
         return 1
 
     if args.action == "status":
-        for key in ("ServiceName", "Status", "TotalInstance", "RunningInstance",
-                    "PendingInstance", "Message", "InternetEndpoint", "IntranetEndpoint",
-                    "Gpu", "Cpu", "Memory", "QuotaId", "UpdateTime"):
+        for key in (
+            "ServiceName",
+            "Status",
+            "TotalInstance",
+            "RunningInstance",
+            "PendingInstance",
+            "Message",
+            "InternetEndpoint",
+            "IntranetEndpoint",
+            "Gpu",
+            "Cpu",
+            "Memory",
+            "QuotaId",
+            "UpdateTime",
+        ):
             print(f"{key}: {service.get(key)}")
         return 0
 

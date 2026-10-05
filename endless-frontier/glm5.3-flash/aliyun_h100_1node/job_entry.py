@@ -20,7 +20,9 @@ import urllib.request
 from pathlib import Path
 
 SRC = os.environ.get("GLM53_SGLANG_SOURCE", "/mnt/data/REPLACE_WITH_ACCOUNT_DIR/sglang")
-MODEL = os.environ.get("GLM53_MODEL_PATH", "/mnt/data/public_data/public_model/GLM5.3/GLM-5.3-Flash")
+MODEL = os.environ.get(
+    "GLM53_MODEL_PATH", "/mnt/data/public_data/public_model/GLM5.3/GLM-5.3-Flash"
+)
 PORT = os.environ.get("GLM53_PORT", "8000")
 SMOKE = os.environ.get("GLM53_SMOKE", "1") == "1"
 SCRIPT = f"{SRC}/endless-frontier/glm5.3-flash/h100/deploy_glm53_flash_1m.sh"
@@ -44,10 +46,20 @@ def host_memory() -> str:
 
 def gpu_state() -> str:
     try:
-        rows = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=20,
-        ).stdout.strip().splitlines()
+        rows = (
+            subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used",
+                    "--format=csv,noheader",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            .stdout.strip()
+            .splitlines()
+        )
     except Exception as exc:  # noqa: BLE001
         return f"gpu-error {exc}"
     if not rows:
@@ -65,7 +77,9 @@ def sampler(stop: threading.Event) -> None:
 
 def health() -> int:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=5) as response:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{PORT}/health", timeout=5
+        ) as response:
             return response.status
     except Exception:  # noqa: BLE001
         return 0
@@ -82,15 +96,20 @@ def request(label: str, content: str, max_tokens: int = 200) -> None:
     ).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/v1/chat/completions",
-        data=body, headers={"Content-Type": "application/json"},
+        data=body,
+        headers={"Content-Type": "application/json"},
     )
     started = time.time()
     try:
         data = json.loads(urllib.request.urlopen(req, timeout=1800).read().decode())
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
-        log(f"RESULT {label} elapsed={time.time() - started:.1f}s finish={choice.get('finish_reason')}")
-        log(f"  content={(message.get('content') or '')[:300]!r} usage={data.get('usage')}")
+        log(
+            f"RESULT {label} elapsed={time.time() - started:.1f}s finish={choice.get('finish_reason')}"
+        )
+        log(
+            f"  content={(message.get('content') or '')[:300]!r} usage={data.get('usage')}"
+        )
     except Exception as exc:  # noqa: BLE001
         log(f"RESULT {label} ERROR {type(exc).__name__} {str(exc)[:250]}")
 
@@ -102,7 +121,9 @@ def main() -> int:
     log(host_memory())
     log(gpu_state())
 
-    check = subprocess.run(["bash", SCRIPT, "--check-only"], capture_output=True, text=True)
+    check = subprocess.run(
+        ["bash", SCRIPT, "--check-only"], capture_output=True, text=True
+    )
     log(f"=== check-only rc={check.returncode} ===")
     log((check.stdout or "")[-2000:])
     if check.returncode != 0:
@@ -119,7 +140,11 @@ def main() -> int:
     env["GLM53_PORT"] = PORT
     handle = LOG.open("w")
     proc = subprocess.Popen(
-        ["bash", SCRIPT], stdout=handle, stderr=subprocess.STDOUT, env=env, start_new_session=True,
+        ["bash", SCRIPT],
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
     )
     log(f"launched recipe pid={proc.pid}")
 
@@ -128,8 +153,10 @@ def main() -> int:
         time.sleep(15)
         code = health()
         alive = proc.poll() is None
-        log(f"[tick {tick}] {time.strftime('%H:%M:%S')} health={code} alive={alive} "
-            f"{host_memory()} {gpu_state()}")
+        log(
+            f"[tick {tick}] {time.strftime('%H:%M:%S')} health={code} alive={alive} "
+            f"{host_memory()} {gpu_state()}"
+        )
         if tick % 4 == 0:
             tail = LOG.read_text(errors="replace").splitlines()[-3:]
             log("  srv: " + " | ".join(tail)[:600])
@@ -148,7 +175,7 @@ def main() -> int:
         request("short", "Reply with exactly: pong")
         filler = "The quick brown fox jumps over the lazy dog. " * 1600
         log(f"smoke long prompt: {len(filler)} chars (~16k tokens expected)")
-            request("long16k", filler + " Now reply with exactly: longpong")
+        request("long16k", filler + " Now reply with exactly: longpong")
     elif not ready:
         log("NOT-READY")
 
