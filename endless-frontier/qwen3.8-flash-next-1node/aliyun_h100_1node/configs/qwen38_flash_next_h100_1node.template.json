@@ -1,0 +1,38 @@
+{
+  "_comment": "Qwen3.8-Flash-Next 单机 8 卡 DLC 作业模板。所有 REPLACE_WITH_* 都要替换成真实值；真实值不要提交进仓库。镜像必须是我们自己构建并已验证的那一个（见 ../image.lock）。",
+  "schema_version": "qwen38-flash-next-h100-1node-v1",
+  "name": "qwen38-flash-next-h100-1node",
+  "aliyun": {
+    "region": "cn-shanghai",
+    "endpoint": "pai-dlc.cn-shanghai.aliyuncs.com",
+    "workspace_id": "REPLACE_WITH_WORKSPACE_ID",
+    "resource_id": "REPLACE_WITH_DLC_QUOTA_OR_RESOURCE_ID",
+    "priority": 5,
+    "node_count": 1,
+    "gpus_per_node": 8,
+    "worker_cpu": 160,
+    "worker_memory": "1500Gi",
+    "worker_shared_memory": "256Gi",
+    "worker_image": "REPLACE_WITH_OUR_IMAGE_URI",
+    "image_note": "自有镜像（CUDA 13.0 devel + 本仓库固定提交的源码 + sglang-kernel 0.4.7 + flashinfer 0.6.18）。镜像内已含 /opt/sglang/python，作业不再注入任何共享源码树。",
+    "enable_rdma": false,
+    "job_max_running_time_minutes": 60,
+    "data_sources": [
+      {
+        "data_source_id": "REPLACE_WITH_PAI_DATASET_ID",
+        "mount_path": "/mnt/data",
+        "options": "{}"
+      }
+    ]
+  },
+  "runtime": {
+    "sglang_source": "/opt/sglang/python",
+    "model_path": "/mnt/data/public_data/public_model/Qwen3.8/Qwen3.8-Flash-Next-1M",
+    "served_model_name": "qwen38-flash-next-1m",
+    "port": 40000,
+    "tp_size": 8,
+    "mem_fraction_static": 0.9,
+    "speculative": 1,
+    "smoke": 1
+  }
+}
