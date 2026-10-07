@@ -128,7 +128,7 @@ def main() -> int:
         if not args.apply:
             print(f"（未删除：这会停掉 {args.name}；加 --apply 确认）")
             return 0
-        eas_client.delete_service(args.name)
+        eas_client.delete_service(REGION, args.name)
         print("已提交删除：", args.name)
         return 0
 
