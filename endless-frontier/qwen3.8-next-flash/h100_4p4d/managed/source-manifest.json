@@ -1,0 +1,45 @@
+{
+  "base_commit": "d6221bec2afeb66af0ec3e9f666addb8613203b5",
+  "files": {
+    "python/sglang/srt/disaggregation/prefill.py": {
+      "before": "f135e8c9cb7c03444617ac14faeffe6e6b709fe1dadcf6950f6a625a908ce490",
+      "after": "997c521b458dbc4ac49fb30fc44ff0b7b36692ce5b927590c6d07539a5b57b8a"
+    },
+    "python/sglang/srt/managers/load_snapshot.py": {
+      "before": "e38c1ace5876b6420c3c3a6be7e7ae94da8afbd61024c4987af1ae45b4b6e528",
+      "after": "5960120f820ea0d755d5406238ea0cb34f801aea22e3245b96657482e7194711"
+    },
+    "python/sglang/srt/managers/schedule_batch.py": {
+      "before": "06777e7b4c8a1d0b978a42c0370cf359a552fe7a23db411262f650db19755f7d",
+      "after": "5cb5ba35a795c96fb44fd1caf6793b1f0ca29dc4660343c08c9e3caa0bd83ee5"
+    },
+    "python/sglang/srt/managers/scheduler.py": {
+      "before": "da9fa5ec049144af66ef4946138bbe75286ac87688da988222d923243f6d5608",
+      "after": "7d6a42818c27e4df812e8dc3dd12ee010f751d2538372c593396396e1e978da0"
+    },
+    "python/sglang/srt/managers/scheduler_components/fair_prefill.py": {
+      "before": null,
+      "after": "b04e4ed0936b4e41b95096b5f2aa4ed2ef17fe05acf285ddef56583d9388fdce"
+    },
+    "python/sglang/srt/managers/scheduler_components/invariant_checker.py": {
+      "before": "20dc5839a187e25016d9e3d1f2b8f1879d7b8e0fc4b46b42fe15c0abf7ce9279",
+      "after": "6705c257c432918cb46fd8fc5453faccbe5261874c97f117466fbf3f710bdf55"
+    },
+    "python/sglang/srt/managers/scheduler_components/load_inquirer.py": {
+      "before": "39030079fe2eaac45fbbedb3016c6afdc264b8bceaeb5a7b371b4521a1a80091",
+      "after": "1c667ff2dc37f97291ffacd45b7bd71b99f313a5ddec6e3ea81e262b8a3b65de"
+    },
+    "python/sglang/srt/managers/scheduler_components/prefill_capacity.py": {
+      "before": null,
+      "after": "ae55dd996a81d277689fdf62d49c7f3a1eb837be7b175f4d3bcfe98c2f56306f"
+    },
+    "python/sglang/srt/mem_cache/prefill_budget.py": {
+      "before": "07872cf2152362560c9d501f3d35896e3652b6668821477d035813ca3ef2f3b1",
+      "after": "beeeb2f749d319a4c438bf6ec0e73fa7be7dc2523a325678c134e1939abdac6c"
+    },
+    "python/sglang/srt/observability/pd_request_audit.py": {
+      "before": null,
+      "after": "b6d699c2bd3316d66ff143ec52c756a5922111b330d344c3129a2c108723eb75"
+    }
+  }
+}

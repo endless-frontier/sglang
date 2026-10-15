@@ -5,12 +5,14 @@
 一台 Router 把 OpenAI 兼容请求分发给 Prefill/Decode 组合，
 Prefill 的 KV 经 **Mooncake + RoCE v2** 直传 Decode。
 
-本目录是 [`../h100_2p2d/`](../h100_2p2d/) 的横向扩展版：**worker 脚本、镜像、调参、
-显存/容量结论完全一致**，只是 prefill 与 decode 各从 2 台变 4 台，
-Router 从 `round_robin` 换成 **`cache_aware`**（原因见「路由策略」）。
+**当前推荐部署方案见 [`managed/README.md`](managed/README.md)**：包含有界交错
+prefill、暂停上下文完成空间计账、同 worker admission credit、真实 scheduler / 原生进展
+健康判定和所属进程组恢复。默认内网直接调用，保持 P HRRN / D FCFS 与
+`2 / 4096 / 8192` 上下文、quantum、批次预算。
 
-已在本集群实测通过（8 台 8 卡 H100，300k / 800k 长上下文压测无崩溃），
-参考性能见 [`RESULTS.md`](RESULTS.md)。
+下文保留由 [`../h100_2p2d/`](../h100_2p2d/) 扩展的原生 Router / HiCache 配方。
+[`RESULTS.md`](RESULTS.md) 的 300k / 800k 测量属于该原配方；新方案的验证范围与
+尚存的 D 容量、长请求限制在 managed 文档中单列，不据历史数字宣称新调度收益。
 
 ## 拓扑与端口
 
