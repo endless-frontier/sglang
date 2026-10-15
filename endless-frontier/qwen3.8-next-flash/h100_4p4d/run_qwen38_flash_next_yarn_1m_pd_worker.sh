@@ -146,8 +146,8 @@ if config.get("model_type") != "qwen4_exp" or not isinstance(text_config, dict):
     raise SystemExit(f"模型不是 qwen4_exp 架构：model_type={config.get('model_type')!r}")
 
 native = text_config.get("max_position_embeddings")
-if native != 262144:
-    raise SystemExit(f"原生 max_position_embeddings={native!r}，期望 262144")
+if native not in (262144, 524288):
+    raise SystemExit(f"原生 max_position_embeddings={native!r}，期望 262144 或 524288")
 
 target_rope = {
     "mrope_interleaved": True,
@@ -155,15 +155,15 @@ target_rope = {
     "rope_type": "yarn",
     "rope_theta": 10000000,
     "partial_rotary_factor": 0.25,
-    "factor": 4.0,
-    "original_max_position_embeddings": 262144,
+    "factor": 1048576 / native,
+    "original_max_position_embeddings": native,
 }
 
 def is_1m(rope):
     try:
         return (
             (rope or {}).get("rope_type") == "yarn"
-            and float((rope or {}).get("factor", 0) or 0) == 4.0
+            and float((rope or {}).get("factor", 0) or 0) == 1048576 / native
             and int((rope or {}).get("original_max_position_embeddings", 0) or 0) == int(native)
         )
     except (TypeError, ValueError):
@@ -210,7 +210,8 @@ if config.get("model_type") != "qwen4_exp":
     raise SystemExit("unexpected model_type=%r" % config.get("model_type"))
 
 rope = (config.get("text_config") or {}).get("rope_parameters") or {}
-if rope.get("rope_type") != "yarn" or float(rope.get("factor", 0) or 0) != 4.0:
+native = (config.get("text_config") or {}).get("max_position_embeddings")
+if rope.get("rope_type") != "yarn" or float(rope.get("factor", 0) or 0) != 1048576 / native:
     raise SystemExit("YaRN 未生效：%r" % rope)
 
 native = (config.get("text_config") or {}).get("max_position_embeddings")
@@ -297,11 +298,14 @@ args=(
     --kv-cache-dtype bfloat16
     --context-length "${CONTEXT_LENGTH}"
     --max-running-requests "${MAX_RUNNING_REQUESTS}"
+    --enable-metrics
+    --enable-request-time-stats-logging
     --chunked-prefill-size "${CHUNKED_PREFILL_SIZE}"
     --page-size "${PAGE_SIZE}"
     --mem-fraction-static "${MEM_FRACTION_STATIC}"
     --num-continuous-decode-steps 1
     --scheduler-recv-interval 1
+    --schedule-policy "${QWEN38_SCHEDULE_POLICY:-fcfs}"
     --tool-call-parser qwen3_coder
     --reasoning-parser qwen3
     --enable-fused-moe-sum-all-reduce

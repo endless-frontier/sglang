@@ -1,0 +1,543 @@
+--- a/python/sglang/srt/disaggregation/prefill.py
++++ b/python/sglang/srt/disaggregation/prefill.py
+@@ -624,0 +625,3 @@
++        from sglang.srt.managers.scheduler_components.fair_prefill import enabled, event_loop
++        if enabled(self):
++            return event_loop(self)
+@@ -662,0 +666,3 @@
++        from sglang.srt.managers.scheduler_components.fair_prefill import enabled, event_loop
++        if enabled(self):
++            return event_loop(self)
+@@ -721,0 +728,4 @@
++        from sglang.srt.managers.scheduler_components.fair_prefill import enabled, before_result, after_result
++        fair = enabled(self) and hasattr(batch, "fair_spans")
++        if fair:
++            before_result(self, batch)
+@@ -951,0 +962,2 @@
++        if fair:
++            after_result(self, batch)
+--- a/python/sglang/srt/managers/load_snapshot.py
++++ b/python/sglang/srt/managers/load_snapshot.py
+@@ -222,0 +223 @@
++    pd_admission: Optional[dict] = None
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -1286,0 +1287,2 @@
++        from sglang.srt.observability.pd_request_audit import bind as pd_audit_bind
++        pd_audit_bind(self.time_stats, bootstrap_room, len(self.origin_input_ids), self.sampling_params.max_new_tokens)
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -2367 +2367 @@
+-            get_chunked_req=lambda: self.chunked_req,
++            get_chunked_req=lambda: (getattr(self, "fair_paused", []) if os.environ.get("QWEN38_FAIR_PREFILL") == "1" and self.disaggregation_mode == DisaggregationMode.PREFILL else self.chunked_req),
+@@ -2433 +2433 @@
+-            get_chunked_req=lambda: self.chunked_req,
++            get_chunked_req=lambda: (getattr(self, "fair_paused", []) if os.environ.get("QWEN38_FAIR_PREFILL") == "1" and self.disaggregation_mode == DisaggregationMode.PREFILL else self.chunked_req),
+@@ -4835,0 +4836,2 @@
++        if getattr(self, 'fair_paused', None):
++            return False
+@@ -5244,0 +5247,3 @@
++        from sglang.srt.managers.scheduler_components.fair_prefill import enabled, abort_paused
++        if enabled(self):
++            abort_paused(self, recv_req)
+--- /dev/null
++++ b/python/sglang/srt/managers/scheduler_components/fair_prefill.py
+@@ -0,0 +1,324 @@
++"""PD prefill quantum scheduler for the pinned Qwen4Exp TP8 engine.
++
++Results are drained before another batch is admitted:
++no request's mutable extend range or linear state is advanced with an unresolved
++forward. Native allocators, prefix pins, Mamba COW and PD senders own resources.
++"""
++from __future__ import annotations
++
++import json
++import os
++import time
++from collections import deque
++from pathlib import Path
++
++import torch.distributed as dist
++
++
++def enabled(s):
++    return os.environ.get("QWEN38_FAIR_PREFILL") == "1" and str(s.disaggregation_mode.value) == "prefill"
++
++
++def consensus(s, value):
++    if not dist.is_initialized():
++        return value
++    data = [value if s.ps.tp_rank == 0 else None]
++    dist.broadcast_object_list(data, src=s.tp_group.ranks[0], group=s.tp_cpu_group)
++    return data[0]
++
++
++def state(s):
++    if not hasattr(s, "fair_paused"):
++        assert s.ps.pp_size == 1 and s.ps.tp_size == 8
++        assert s.spec_algorithm.is_none() and not s.enable_lora
++        assert not s.is_mixed_chunk and s.dllm_config is None
++        s.fair_paused = []
++        s.fair_sequence = 0
++        s.fair_iteration = 0
++        s.fair_config = {"contexts": 2, "quantum": 4096, "budget": 8192, "mode": "fair"}
++        s.fair_last_config_check = 0
++        s.fair_last_meta = {}
++        # Native idle/flush/health bookkeeping reads the overlap result queue.
++        s.result_queue = deque()
++        metadata(s, "initialized", (), contexts=2, mode="fair")
++    return s.fair_paused
++
++
++def configure_when_drained(s):
++    state(s)
++    if s.fair_paused or s.waiting_queue:
++        return
++    # All ranks must take the same collective branch, including idle polling.
++    now = consensus(s, time.monotonic())
++    if now - s.fair_last_config_check < 1:
++        return
++    s.fair_last_config_check = now
++    value = s.fair_config
++    if s.ps.tp_rank == 0:
++        try:
++            from sglang.srt.observability.pd_request_audit import read_control
++            value = read_control()
++        except (OSError, ValueError, KeyError, ImportError):
++            pass
++    value = consensus(s, value)
++    assert value["contexts"] in (1, 2, 4) and value["quantum"] in (4096, 8192)
++    assert value["budget"] == 8192 and value["mode"] in ("fair", "control")
++    if value["mode"] == "control":
++        assert value["contexts"] == 1 and value["quantum"] == 8192
++    changed = value != s.fair_config
++    s.fair_config = value
++    if changed:
++        metadata(s, "configured", (), contexts=value["contexts"], mode=value["mode"])
++
++
++def progress_origin(r):
++    return getattr(r, "fair_last_progress", r.fair_first_ready)
++
++
++def order_requests(requests, now):
++    """One oldest eligible progress slot, then cache/work-aware aged packing."""
++    if not requests:
++        return []
++    oldest = min(requests, key=lambda r: (progress_origin(r), r.fair_sequence))
++    def cost(r):
++        cached = len(r.prefix_indices) if getattr(r, "fair_started", False) else r.num_matched_prefix_tokens
++        remain = max(1, len(r.origin_input_ids) - cached)
++        # Bounded per-quantum attention work proxy, not calibrated milliseconds.
++        q = min(4096, remain)
++        return q * (1 + (cached + q / 2) / 262144)
++    rest = sorted((r for r in requests if r is not oldest),
++                  key=lambda r: (-(now - progress_origin(r)) / cost(r), r.fair_sequence))
++    return [oldest] + rest
++
++
++def metadata(s, event, rows=(), **values):
++    if s.ps.tp_rank != 0:
++        return
++    from sglang.srt.observability.pd_request_audit import fair_event
++    outstanding = getattr(s, "fair_paused", []) + s.waiting_queue
++    work = sum(max(0, len(r.origin_input_ids) - (len(r.prefix_indices) if getattr(r,"fair_started",False) else r.num_matched_prefix_tokens)) *
++               (1 + (len(r.prefix_indices) if getattr(r,"fair_started",False) else r.num_matched_prefix_tokens) / 262144)
++               for r in outstanding)
++    fair_event(event, iteration=s.fair_iteration, queued_work_units=work,
++               paused_contexts=len(getattr(s,"fair_paused",[])), **values,
++               requests=[dict(room=r.bootstrap_room, start=a, end=b,
++                              input_tokens=len(r.origin_input_ids),
++                              first_ready_mono=r.fair_first_ready,
++                              progress_origin_mono=progress_origin(r)) for r, a, b in rows])
++    # Export these numeric gauges in the same-worker HTTP admission snapshot,
++    # rather than only writing them to the phase journal.
++    from sglang.srt.observability.pd_request_audit import _fair_status
++    _fair_status.update(queued_work_units=work,
++                        paused_contexts=len(getattr(s,"fair_paused",[])))
++
++
++def next_batch(s, running_batch, last_batch):
++    from sglang.srt.managers.schedule_batch import ScheduleBatch
++    from sglang.srt.managers.schedule_policy import PrefillAdder, AddReqResult
++    from sglang.srt.managers.schedule_batch import NextBatchPlan
++    from sglang.srt.managers.scheduler_components.metrics_reporter import PrefillStats
++    from sglang.srt.observability.req_time_stats import set_time_batch, set_schedule_time_batch
++    from sglang.srt.disaggregation.utils import is_aborted
++
++    state(s)
++    s._process_hicache_events()
++    s.resolve_waiting_queue_bootstrap()
++    if s.grammar_manager.has_waiting_grammars():
++        for r in s.grammar_manager.get_ready_grammar_requests():
++            s._add_request_to_queue(r)
++    # The active continuation set uses native sender readiness/failed handling.
++    for r in list(s.fair_paused):
++        if not s.check_bootstrap(r) and is_aborted(r):
++            s.fair_paused.remove(r)
++    s.policy.calc_priority(s.waiting_queue, running_batch,
++                           processed_tokens=s.processed_tokens_counter)
++    now = consensus(s, time.monotonic())
++    for r in s.waiting_queue:
++        if not hasattr(r, "fair_first_ready"):
++            r.fair_first_ready = now
++            r.fair_sequence = s.fair_sequence
++            s.fair_sequence += 1
++    eligible = [r for r in s.fair_paused + s.waiting_queue
++                if not is_aborted(r) and not r.pending_bootstrap]
++    if not eligible:
++        return NextBatchPlan(batch_to_run=None, running_batch=running_batch)
++    if s.fair_config["mode"] == "control":
++        ordered = s.fair_paused + [r for r in s.waiting_queue if r in eligible]
++    else:
++        ordered = order_requests(eligible, now)
++    ordered_ids = consensus(s, [r.rid for r in ordered])
++    by_id = {r.rid: r for r in eligible}
++    assert set(by_id) == set(ordered_ids), "TP candidate divergence"
++    ordered = [by_id[rid] for rid in ordered_ids]
++    cfg = s.fair_config
++    # 4096 is a ceiling. Four contexts share 8192, so initial shares are 2048.
++    share = min(cfg["quantum"], (cfg["budget"] // min(cfg["contexts"], len(ordered))) // s.page_size * s.page_size)
++    adder = PrefillAdder(s.page_size, s.tree_cache, s.token_to_kv_pool_allocator,
++                         running_batch, s.new_token_ratio_tracker.current,
++                         s.max_prefill_tokens, cfg["budget"],
++                         max_running_requests=s.max_running_requests,
++                         waiting_queue_len=len(s.waiting_queue))
++    allocator = getattr(s.req_to_token_pool, "mamba_allocator", None)
++    if allocator is not None:
++        allocator.alloc_group_begin(len(s.waiting_queue))
++    spans = []
++    try:
++        for r in ordered:
++            if len(spans) >= cfg["contexts"] or adder.rem_chunk_tokens < s.page_size:
++                break
++            started = getattr(r, "fair_started", False)
++            if not started and s.req_to_token_pool.available_size() <= sum(not getattr(x, "fair_started", False) for x in adder.can_run_list):
++                continue
++            if not started and len(adder.can_run_list) >= s.get_num_allocatable_reqs(0, running_batch=running_batch):
++                continue
++            global_remaining = adder.rem_chunk_tokens
++            allowance = min(share, global_remaining)
++            adder.rem_chunk_tokens = allowance
++            before = len(adder.can_run_list)
++            if started:
++                r.init_next_round_input()
++                available=adder.memory_budget.available_chunk_tokens(allowance)
++                fit=adder.memory_budget.fit_chunk(extend_input_len=len(r.origin_input_ids)-len(r.prefix_indices),
++                        max_new_tokens=adder._swa_new_tokens(r), chunk_limit=available) if available else None
++                if fit and fit>0:
++                    adder.add_chunked_req(r)
++            else:
++                r.init_next_round_input(s.tree_cache)
++                from sglang.srt.managers.scheduler_components.prefill_capacity import paused_completion_debt
++                debt = paused_completion_debt(s.fair_paused, adder.can_run_list, s.page_size)
++                adder.memory_budget.total_offset += debt
++                try:
++                    adder.add_one_req(r, has_chunked_req=False, truncation_align_size=s.truncation_align_size)
++                finally:
++                    adder.memory_budget.total_offset -= debt
++            charged = allowance - adder.rem_chunk_tokens
++            adder.rem_chunk_tokens = global_remaining - charged
++            if len(adder.can_run_list) == before:
++                r.kv.mamba_cow_src_index = None
++                r.kv.mamba_needs_clear = False
++                # Do not free an existing continuation's active state.
++                if not started and r.kv.holds_mamba and not getattr(r, "session", None):
++                    s.tree_cache.req_to_token_pool.mamba_allocator.free(r.kv.mamba_pool_idx.unsqueeze(-1))
++                    r.kv.mamba_pool_idx = None
++                continue
++            a, b = r.extend_range.start, r.extend_range.end
++            assert 0 < b - a <= cfg["quantum"] and b <= len(r.origin_input_ids)
++            if started:
++                assert a == r.fair_completed_end, "duplicate or skipped prefill span"
++            r.fair_started = True
++            if r not in s.fair_paused:
++                s.fair_paused.append(r)
++            if b < len(r.origin_input_ids):
++                r.inflight_middle_chunks += 1
++            spans.append((r, a, b))
++    finally:
++        if allocator is not None:
++            allocator.alloc_group_end()
++    if not spans:
++        return NextBatchPlan(batch_to_run=None, running_batch=running_batch)
++    s.waiting_queue = [r for r in s.waiting_queue if r not in adder.can_run_list]
++    s.chunked_req = None  # Legacy singleton is deliberately unused in this mode.
++    set_time_batch(adder.can_run_list, "set_forward_entry_time")
++    batch = ScheduleBatch.init_new(adder.can_run_list, s.req_to_token_pool,
++                                   s.token_to_kv_pool_allocator, s.tree_cache,
++                                   s.model_config, s.enable_overlap, s.spec_algorithm)
++    batch.fair_spans = tuple(spans)
++    batch.contains_last_prefill_chunk = any(b == len(r.origin_input_ids) for r, a, b in spans)
++    if s.enable_hierarchical_cache or s.enable_unified_cache_external_linker:
++        batch.hicache_consumer_index = s.tree_cache.ready_to_load_host_cache()
++    batch.prepare_for_extend()
++    batch.prefill_stats = PrefillStats.from_adder(adder, running_batch.reqs,
++                                                s.enable_priority_scheduling,
++                                                num_pending_tokens=s.load_inquirer._get_num_pending_tokens())
++    batch = s.dp_attn_adapter.maybe_prepare_mlp_sync_batch(batch)
++    set_schedule_time_batch(batch)
++    s.fair_iteration += 1
++    metadata(s, "planned", spans, contexts=cfg["contexts"], mode=cfg["mode"], total_tokens=sum(b-a for r,a,b in spans))
++    return NextBatchPlan(batch_to_run=batch, running_batch=running_batch)
++
++
++def before_result(s, batch):
++    for r, a, b in batch.fair_spans:
++        assert (r.extend_range.start, r.extend_range.end) == (a, b)
++        r.tmp_end_idx = b
++
++
++def after_result(s, batch):
++    from sglang.srt.mem_cache.common import maybe_cache_unfinished_req
++    from sglang.srt.disaggregation.utils import is_aborted
++    now = consensus(s, time.monotonic())
++    for r, a, b in batch.fair_spans:
++        if is_aborted(r):
++            if r in s.fair_paused:
++                s.fair_paused.remove(r)
++            continue
++        r.fair_completed_end = b
++        r.fair_last_progress = now
++        if b < len(r.origin_input_ids):
++            # Native cache owns prefix pins and per-request Mamba ping-pong slots.
++            maybe_cache_unfinished_req(r, s.tree_cache, chunked=True)
++        elif r in s.fair_paused:
++            s.fair_paused.remove(r)
++        assert r.inflight_middle_chunks == 0, "unresolved middle chunk"
++    metadata(s, "completed", batch.fair_spans, completed_mono=now)
++
++
++def abort_paused(s, request):
++    from sglang.srt.managers.scheduler import _make_abort_req
++    from sglang.srt.disaggregation.utils import prepare_abort
++    from sglang.srt.disaggregation.prefill import maybe_release_metadata_buffer
++    from sglang.srt.mem_cache.common import release_kv_cache
++    state(s)
++    for r in list(s.fair_paused):
++        if not request.abort_all and not r.rid.startswith(request.rid):
++            continue
++        assert r.inflight_middle_chunks == 0, "abort before result drain"
++        prepare_abort(r, "Aborted")
++        s.clear_pending_chunk_send(r)
++        r.disagg_kv_sender.abort()
++        maybe_release_metadata_buffer(r, s.req_to_metadata_buffer_idx_allocator)
++        r.pending_bootstrap = False
++        s._release_aborted_request(r)
++        release_kv_cache(r, s.tree_cache, is_insert=False)
++        s.fair_paused.remove(r)
++        s.ipc_channels.send_to_tokenizer.send_output(_make_abort_req(r), r)
++        metadata(s, "cancelled", (), room=r.bootstrap_room)
++
++
++def event_loop(s):
++    state(s)
++    while True:
++        # Complete GPU/CPU copies before changing any request spans or states.
++        if s.result_queue:
++            batch, result = s.result_queue.popleft()
++            s.process_batch_result(batch, result)
++        s.process_disagg_prefill_inflight_queue()
++        configure_when_drained(s)
++        s.ingest_requests()
++        if s._engine_paused:
++            s._record_scheduler_state_for_paused_engine()
++            continue
++        s.waiting_queue.extend(s.disagg_prefill_bootstrap_queue.pop_bootstrapped())
++        plan = next_batch(s, s.running_batch, s.last_batch)
++        s.running_batch = plan.running_batch
++        batch = s.ngram_embedding_manager.prepare_for_forward(plan.batch_to_run, chunked_req=None)
++        s.cur_batch_for_debug = batch
++        if batch is not None:
++            if s.enable_staging:
++                s.maybe_prefetch_staging_for_batch(batch)
++            result = s.run_batch(batch)
++            if s.enable_overlap:
++                s._apply_war_barrier()
++                s.launch_batch_sample_if_needed(result, batch)
++            s.result_queue.append((batch, result))
++        elif not s.fair_paused:
++            s.on_idle()
++        else:
++            s.maybe_send_health_check_signal()
++            now = time.monotonic()
++            if now - getattr(s, 'fair_last_stall_publish', 0) >= 1.:
++                s.fair_last_stall_publish = now
++                snapshot = s.publish_load_snapshot(force=True)
++                s.load_publisher.publish_load_stat(s.load_inquirer.get_loads, force=True, snapshot=snapshot)
++            time.sleep(.001)
++        s.last_batch = batch
+--- a/python/sglang/srt/managers/scheduler_components/invariant_checker.py
++++ b/python/sglang/srt/managers/scheduler_components/invariant_checker.py
+@@ -275 +275 @@
+-            reqs.append(chunked_req)
++            reqs.extend(chunked_req if isinstance(chunked_req, (list, tuple)) else [chunked_req])
+--- a/python/sglang/srt/managers/scheduler_components/load_inquirer.py
++++ b/python/sglang/srt/managers/scheduler_components/load_inquirer.py
+@@ -75,3 +75,3 @@
+-        if self.get_chunked_req() is not None:
+-            req = self.get_chunked_req()
+-            num_pending_tokens += req.seqlen - len(req.prefix_indices) - chunk_deduct
++        cr = self.get_chunked_req()
++        reqs = cr if isinstance(cr, (list, tuple)) else ([cr] if cr is not None else [])
++        num_pending_tokens += sum(max(0, r.seqlen-len(r.prefix_indices)) for r in reqs)-chunk_deduct
+@@ -93,2 +93,2 @@
+-        if cr is not None:
+-            num_tokens += max(0, cr.seqlen - len(cr.prefix_indices))
++        reqs = cr if isinstance(cr, (list, tuple)) else ([cr] if cr is not None else [])
++        num_tokens += sum(max(0, r.seqlen-len(r.prefix_indices)) for r in reqs)
+@@ -128,0 +129,3 @@
++        cr = self.get_chunked_req()
++        if isinstance(cr, (list, tuple)):
++            waiting_queues.append(cr)
+@@ -216,0 +220,2 @@
++        from sglang.srt.observability.pd_request_audit import admission_snapshot
++        pd_admission = admission_snapshot()
+@@ -217,0 +223 @@
++            pd_admission=pd_admission,
+--- /dev/null
++++ b/python/sglang/srt/managers/scheduler_components/prefill_capacity.py
+@@ -0,0 +1,14 @@
++"""Reserve unfinished P owners before admitting a new context; no policy changes."""
++def aligned(n,page):
++    return ((max(0,int(n))+page-1)//page)*page
++
++def paused_completion_debt(requests,selected,page):
++    chosen={r.rid for r in selected}
++    unique={r.rid:r for r in requests if not r.finished() and not r.is_retracted}
++    debt=0
++    for r in unique.values():
++        end=r.extend_range.end if r.rid in chosen else r.kv.kv_allocated_len
++        remaining=max(0,aligned(len(r.origin_input_ids),page)-aligned(end,page))
++        if remaining:
++            debt+=remaining+page+max(0,r.sampling_params.max_new_tokens-len(r.output_ids))
++    return debt
+--- a/python/sglang/srt/mem_cache/prefill_budget.py
++++ b/python/sglang/srt/mem_cache/prefill_budget.py
+@@ -126,12 +126,10 @@
+-        available = min(chunk_limit, int(self.remaining_total))
+-        # Single-pool continuation must make progress to release its KV.
+-        return available if available > 0 else chunk_limit
+-
+-    def fit_chunk(
+-        self,
+-        *,
+-        extend_input_len: int,
+-        max_new_tokens: int,
+-        chunk_limit: int,
+-    ) -> int | None:
+-        return chunk_limit
++        available = min(chunk_limit, int(self.remaining_total), int(self.remaining_current))
++        return available if available > 0 else None
++
++    def fit_chunk(self, *, extend_input_len: int, max_new_tokens: int,
++                  chunk_limit: int) -> int | None:
++        candidate = min(extend_input_len, chunk_limit)
++        headroom = max_new_tokens if candidate >= extend_input_len else 0
++        available = int(min(self.remaining_current, self.remaining_total)) - self.page_size - headroom
++        cap = max(0, available // self.page_size * self.page_size)
++        return min(candidate, cap) if cap > 0 else None
+--- /dev/null
++++ b/python/sglang/srt/observability/pd_request_audit.py
+@@ -0,0 +1,101 @@
++"""Metadata-only scheduler stage journal. Called by the deployment recipe."""
++import functools
++from collections import deque
++import json
++import logging
++from logging.handlers import RotatingFileHandler
++import os
++import time
++from pathlib import Path
++
++_installed = False
++# Bounded telemetry ring, never a request/queue limit. Missing old IDs keep credit.
++_admission_ring = deque(maxlen=256)
++
++def admission_snapshot():
++    return {'protocol': 'same-worker-admission-v1', 'rank': int(os.environ['QWEN38_NODE_RANK']), 'recent': list(_admission_ring), 'fair_prefill': dict(_fair_status)}
++_logger = None
++PHASES = {
++    'set_prefill_bootstrap_queue_entry_time': 'p_bootstrap',
++    'set_decode_prealloc_queue_entry_time': 'd_prealloc',
++    'set_decode_transfer_queue_entry_time': 'd_allocated',
++    'set_wait_queue_entry_time': 'compute_wait',
++    'set_forward_entry_time': 'forward_start',
++    'set_prefill_finished_time': 'prefill_finished',
++    'set_prefill_transfer_queue_entry_time': 'p_transfer',
++    'set_prefill_kv_transfer_finish_time': 'p_kv_finished',
++    'set_completion_time': 'completed',
++}
++
++def emit(stats, phase):
++    global _logger
++    try:
++        meta = getattr(stats, '_pd_meta', None)
++        if not meta or phase in stats._pd_seen:
++            return
++        stats._pd_seen.add(phase)
++        if _logger is None:
++            _logger = logging.getLogger('qwen38_pd_metadata')
++            _logger.setLevel(logging.INFO); _logger.propagate = False
++            path = Path(os.environ['QWEN38_STATE']) / ('request-phases-'+os.environ['QWEN38_NODE_RANK']+'.jsonl')
++            h = RotatingFileHandler(path, maxBytes=64*1024*1024, backupCount=3)
++            h.setFormatter(logging.Formatter('%(message)s')); _logger.addHandler(h)
++        _logger.info(json.dumps(dict(meta, phase=phase, ts=time.time(), mono_ns=time.perf_counter_ns()), separators=(',', ':')))
++    except Exception:
++        # Audit I/O must never break a model request. The ready audit checks output.
++        pass
++
++def bind(stats, room, input_tokens, output_limit):
++    global _installed
++    if room is None:
++        return
++    from sglang.srt.runtime_context import get_parallel
++    if get_parallel().tp_rank != 0:
++        return
++    stats._pd_meta = {'room': int(room), 'rank': int(os.environ['QWEN38_NODE_RANK']),
++                      'input_tokens': int(input_tokens), 'output_limit': int(output_limit)}
++    stats._pd_seen = set()
++    _admission_ring.append([int(room), time.time()])
++    if not _installed:
++        cls = type(stats)
++        for method, phase in PHASES.items():
++            if not hasattr(cls, method):
++                raise RuntimeError('Pinned stage method missing: '+method)
++            original = getattr(cls, method)
++            def wrap(original, phase):
++                @functools.wraps(original)
++                def invoke(self, *a, **kw):
++                    result = original(self, *a, **kw)
++                    emit(self, phase)
++                    return result
++                return invoke
++            setattr(cls, method, wrap(original, phase))
++        _installed = True
++    emit(stats, 'admitted')
++
++
++_fair_status = {}
++_fair_logger = None
++def read_control():
++    path=Path(os.environ['QWEN38_STATE'])/'fair-prefill-control.json'
++    for attempt in range(4):
++        try:
++            return json.loads(path.read_text())
++        except OSError as e:
++            if e.errno not in (5,116) or attempt==3: raise
++            time.sleep(.02*(attempt+1))
++def fair_event(event, **meta):
++    global _fair_logger
++    _fair_status.update(protocol='wall-clock-progress-chunks-v1',
++                        contexts=meta.get('contexts',_fair_status.get('contexts',2)),
++                        mode=meta.get('mode',_fair_status.get('mode','fair')),
++                        iteration=meta['iteration'], event=event,
++                        result_drain_boundary=True, per_request_quantum_ceiling=4096,
++                        batch_token_budget=8192)
++    if _fair_logger is None:
++        _fair_logger=logging.getLogger('qwen38_fair_metadata')
++        _fair_logger.setLevel(logging.INFO);_fair_logger.propagate=False
++        path=Path(os.environ['QWEN38_STATE'])/('fair-prefill-'+os.environ['QWEN38_NODE_RANK']+'.jsonl')
++        h=RotatingFileHandler(path,maxBytes=64*1024*1024,backupCount=3)
++        h.setFormatter(logging.Formatter('%(message)s'));_fair_logger.addHandler(h)
++    _fair_logger.info(json.dumps(dict(event=event,ts=time.time(),**meta),separators=(',',':')))
