@@ -13,6 +13,7 @@
 
 跑法：python3 test_watch_worker.py
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -40,7 +41,9 @@ def drive(w, node, health, proc, work, cycles=6):
     """按给定信号连续跑若干轮，返回 (是否重启过, 日志行)。"""
     w.http_health = lambda url, timeout=None: health
     w.remote_process_alive = lambda ip: proc
-    w.remote_last_work_epoch = lambda ip, role: (int(_time.time()) if work is None else work)
+    w.remote_last_work_epoch = lambda ip, role: (
+        int(_time.time()) if work is None else work
+    )
     restarted = []
     w.restart_remote = lambda n: (restarted.append(n.name), (True, "stub"))[1]
     lines = []
@@ -54,14 +57,14 @@ def drive(w, node, health, proc, work, cycles=6):
 def main():
     w = load_module()
     w.FAIL_THRESHOLD = 3
-    w.MIN_SOFT_DURATION = 0        # 单测里不等真实时间
+    w.MIN_SOFT_DURATION = 0  # 单测里不等真实时间
     w.COOLDOWN = 0
     w.MAX_CONCURRENT_RESTARTS = 2
     w.STARTUP_TIMEOUT = 900
     failures = []
 
     # --- A: 真故障（503 + 进程在 + 没在干活）→ 应该重启 ---
-    node = w.Node("prefill-2", "prefill", "10.0.1.125", 41000)
+    node = w.Node("prefill-2", "prefill", "192.0.2.2", 41000)
     ok, lines = drive(w, node, (False, "http-503"), True, _ago(600))
     print("A 真故障（503，进程在，最近 0 批活）")
     print("   最后一行:", lines[-1])
@@ -70,8 +73,10 @@ def main():
         failures.append("A 应该重启但没有")
 
     # --- B: 假故障（超时 + 进程在 + 一直在干活）→ 不应该重启 ---
-    node = w.Node("prefill-3", "prefill", "10.0.0.45", 41000)
-    ok, lines = drive(w, node, (False, "TimeoutError"), True, None)   # 用 now：失败后还在干活
+    node = w.Node("prefill-3", "prefill", "192.0.2.3", 41000)
+    ok, lines = drive(
+        w, node, (False, "TimeoutError"), True, None
+    )  # 用 now：失败后还在干活
     print("B 假故障（超时，进程在，最近 42 批活）")
     print("   最后一行:", lines[-1])
     print("   -> 重启:", ok)
@@ -79,7 +84,7 @@ def main():
         failures.append("B 不应该重启但重启了")
 
     # --- C: 进程没了 → 应该重启 ---
-    node = w.Node("decode-1", "decode", "10.0.1.126", 42000)
+    node = w.Node("decode-1", "decode", "198.51.100.1", 42000)
     ok, lines = drive(w, node, (False, "URLError"), False, None)
     print("C 进程没了（URLError + pgrep 不到）")
     print("   最后一行:", lines[-1])
@@ -88,7 +93,7 @@ def main():
         failures.append("C 应该重启但没有")
 
     # --- D: SSH 不通（整机挂了）→ 只告警不重启 ---
-    node = w.Node("prefill-4", "prefill", "10.0.0.46", 41000)
+    node = w.Node("prefill-4", "prefill", "192.0.2.4", 41000)
     ok, lines = drive(w, node, (False, "TimeoutError"), None, None)
     print("D 整机不可达（SSH 不通）")
     print("   最后一行:", lines[-1])
@@ -97,7 +102,7 @@ def main():
         failures.append("D 不应该重启但重启了")
 
     # --- E: 单次失败不该触发重启（阈值保护）---
-    node = w.Node("prefill-1", "prefill", "10.0.1.120", 41000)
+    node = w.Node("prefill-1", "prefill", "192.0.2.1", 41000)
     ok, _ = drive(w, node, (False, "http-503"), True, _ago(600), cycles=2)
     print("E 只失败 2 次（阈值 3）")
     print("   -> 重启:", ok)

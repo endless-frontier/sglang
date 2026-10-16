@@ -2,15 +2,18 @@
 """Qwen3.8-Flash-Next 1M PD 压测客户端：测 TTFT / 端到端 / 输出 TPS + KV pool 信息。
 
 用法（在任意能访问 router 的节点上跑，需要能读到模型目录的 tokenizer）：
+  export QWEN38_MODEL_PATH='/path/to/model/hf'
   python3 bench_pd.py --input-tokens 300000 --output-tokens 10000
-  python3 bench_pd.py --input-tokens 800000 --output-tokens 10000 --url http://10.0.1.127:40000
+  python3 bench_pd.py --input-tokens 800000 --output-tokens 10000 --url 'http://<ROUTER_IP>:40000'
 
 输出：单行 JSON + 可读摘要。
 """
+
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -51,22 +54,41 @@ def stream_request(url: str, payload: dict, timeout: float):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://127.0.0.1:40000",
-                    help="router 或 worker 地址（默认本机 router 40000）")
+    ap.add_argument(
+        "--url",
+        default="http://127.0.0.1:40000",
+        help="router 或 worker 地址（默认本机 router 40000）",
+    )
     ap.add_argument("--model", default="qwen38-flash-next-1m")
     ap.add_argument("--input-tokens", type=int, required=True)
     ap.add_argument("--output-tokens", type=int, default=10000)
-    ap.add_argument("--tokenizer", default="/mnt/data/public_data/public_model/Qwen3.8/Qwen3.8-Flash-Next-1M")
-    ap.add_argument("--reasoning-effort", default="low", choices=["xhigh", "medium", "low", "off"])
+    ap.add_argument(
+        "--tokenizer",
+        default=os.environ.get("QWEN38_MODEL_PATH"),
+        help="自己的 HF tokenizer 目录；默认读取 QWEN38_MODEL_PATH",
+    )
+    ap.add_argument(
+        "--reasoning-effort", default="low", choices=["xhigh", "medium", "low", "off"]
+    )
     ap.add_argument("--timeout", type=float, default=7200.0)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--label", default="")
-    ap.add_argument("--salt", default="",
-                    help="前缀盐：非空时整条 prompt 与其它 salt 完全不同（用于打冷启动），"
-                         "同一个 salt 重复发送则可命中前缀缓存（L1/L2）")
-    ap.add_argument("--ignore-eos", type=int, default=1, choices=[0, 1],
-                    help="1=强制生成到 max_tokens（压测用），0=允许模型自然停止")
+    ap.add_argument(
+        "--salt",
+        default="",
+        help="前缀盐：非空时整条 prompt 与其它 salt 完全不同（用于打冷启动），"
+        "同一个 salt 重复发送则可命中前缀缓存（L1/L2）",
+    )
+    ap.add_argument(
+        "--ignore-eos",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="1=强制生成到 max_tokens（压测用），0=允许模型自然停止",
+    )
     args = ap.parse_args()
+    if not args.tokenizer:
+        ap.error("set --tokenizer or QWEN38_MODEL_PATH to your HF tokenizer directory")
 
     from transformers import AutoTokenizer
 
@@ -92,7 +114,10 @@ def main() -> int:
     label = args.label or f"in={args.input_tokens} out={args.output_tokens}"
     if args.salt:
         label = f"{label} salt={args.salt}"
-    print(f"[bench] {label}: 客户端构造 {client_tokens} token，POST {endpoint}", file=sys.stderr)
+    print(
+        f"[bench] {label}: 客户端构造 {client_tokens} token，POST {endpoint}",
+        file=sys.stderr,
+    )
 
     t0 = time.perf_counter()
     resp = stream_request(endpoint, payload, args.timeout)

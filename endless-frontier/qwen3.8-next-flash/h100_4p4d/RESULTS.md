@@ -1,8 +1,9 @@
 # H100 4P4D（TP8 × 8 机）实测结果
 
 测试日期 2026-09-17；模型 `qwen38_flash_bio_0915_4ep/iter_0001285/hf`（qwen4_exp，YaRN 1M）；
-镜像 `dptech-namespace/sglang:sglang-0-5-18-qwen38-next-flash-h100-1m`；
-源码 `/mnt/data/xinyuzhu/sglang`（dev 分支）；客户端 `bench_pd.py`（流式，取服务端 usage）。
+镜像使用 README 中所列 H100 依赖版本；源码 `<SOURCE>`（原测试使用 dev 分支）；
+客户端 `bench_pd.py`（流式，取服务端 usage）。历史环境的个人路径和镜像地址已移除，
+测量数字保留；复现时按 [README](README.md#部署前填写自己的环境) 填写自己的环境。
 
 ## 配置摘要
 
@@ -108,23 +109,24 @@ Prefill 额外 L2（HiCache，ratio 1.5，每台）：
 ## 6. 复现命令
 
 ```bash
-DIR=/mnt/data/xinyuzhu/sglang/endless-frontier/qwen3.8-next-flash/h100_4p4d
-TOK=<模型目录>          # 用 --tokenizer 指定，默认取 public 模型
+SOURCE='/path/to/sglang'
+DIR="$SOURCE/endless-frontier/qwen3.8-next-flash/h100_4p4d"
+TOK='/path/to/model/hf'          # 自己的 HF tokenizer 目录，显式传给 --tokenizer
 
 # 冷启动：每次换 salt
-python3 $DIR/bench_pd.py --url http://<router>:40000 --tokenizer $TOK \
+python3 "$DIR/bench_pd.py" --url 'http://<ROUTER_IP>:40000' --tokenizer "$TOK" \
     --input-tokens 300000 --output-tokens 10000 --salt cold-a
-python3 $DIR/bench_pd.py --url http://<router>:40000 --tokenizer $TOK \
+python3 "$DIR/bench_pd.py" --url 'http://<ROUTER_IP>:40000' --tokenizer "$TOK" \
     --input-tokens 800000 --output-tokens 10000 --salt cold-b
 
 # 前缀复用：复用同一个 salt
-python3 $DIR/bench_pd.py --url http://<router>:40000 --tokenizer $TOK \
+python3 "$DIR/bench_pd.py" --url 'http://<ROUTER_IP>:40000' --tokenizer "$TOK" \
     --input-tokens 800000 --output-tokens 10000 --salt cold-b
 
 # 4 路并发冷启动
 OUT=$(mktemp -d); for i in 1 2 3 4; do
-  python3 $DIR/bench_pd.py --url http://<router>:40000 --tokenizer $TOK \
-      --input-tokens 300000 --output-tokens 2048 --salt "c$i" > $OUT/$i.json 2>/dev/null &
+  python3 "$DIR/bench_pd.py" --url 'http://<ROUTER_IP>:40000' --tokenizer "$TOK" \
+      --input-tokens 300000 --output-tokens 2048 --salt "c$i" > "$OUT/$i.json" 2>/dev/null &
 done; wait
 ```
 

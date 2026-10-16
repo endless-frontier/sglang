@@ -14,21 +14,54 @@ prefill、暂停上下文完成空间计账、同 worker admission credit、真�
 [`RESULTS.md`](RESULTS.md) 的 300k / 800k 测量属于该原配方；新方案的验证范围与
 尚存的 D 容量、长请求限制在 managed 文档中单列，不据历史数字宣称新调度收益。
 
+## 部署前填写自己的环境
+
+本文的 `<...>` 和 `/path/to/...` 都是占位符，执行前必须替换。源码、模型和运行目录
+应在八台机器上使用相同的绝对路径；不要照搬其他部署的节点、目录或配置文件。
+
+| 占位符 / 变量 | 应填写的内容 |
+|---|---|
+| `SOURCE` / `QWEN38_SGLANG_SOURCE` | 自己的兼容 SGLang 源码根目录，包含 `python/sglang`。worker 未设置后者时使用当前脚本所在仓库；managed 配方使用显式 `--source` 并校验文件 hash。 |
+| `MODEL` / `QWEN38_MODEL_PATH` | 自己的 HF 模型导出目录，包含 `config.json`、tokenizer、权重索引及全部 safetensors 分片。worker 必须显式设置 `QWEN38_MODEL_PATH`；原配方会备份后就地修改 YaRN 配置，managed 配方只修改 RUN 内的配置副本。 |
+| `RUN` | 自己的共享部署输出目录，必须为空且位于 Git 工作树之外。managed 的状态、日志、模型配置副本和运行配置都在这里生成。 |
+| `<SERVED_MODEL_NAME>` | 自己对外提供的模型别名，传给 managed 的 `--model-name`；客户端请求的 `model` 使用同一名字。原配方默认别名为 `qwen38-flash-next-1m`。 |
+| `<P0_IP>`…`<P3_IP>` / `<D0_IP>`…`<D3_IP>` | 四台 Prefill 和四台 Decode 的真实内网 IPv4，八个地址互不重复。managed rank 0–3 对应 P0–P3，rank 4–7 对应 D0–D3。 |
+| `<ROUTER_IP>` | 客户端能到达的 Router 所在机器地址；managed 默认放在 D0。 |
+| `<REGISTRY>/<NAMESPACE>/<H100_IMAGE>:<TAG>` | 自己有权拉取、满足下述依赖要求的 H100 镜像。仓库登录凭据由自己的容器运行环境提供。 |
+| `QWEN38_MOE_CONFIG_DIR`（可选） | 自己的 MoE 调优配置目录；设置后脚本检查目录并传给 `SGLANG_MOE_CONFIG_DIR`，未设置时不指定该目录。 |
+| `QWEN38_WATCH_SSH_KEY`（仅原配方看门狗） | 已有 SSH 私钥的文件路径，文件应仅由自己读取；填写路径而非私钥正文。managed supervisor 不需要个人 SSH 私钥。 |
+| `QWEN38_WATCH_WORKER_DIR`（仅原配方看门狗） | 远端 worker / Router 脚本所在目录；默认取本机看门狗脚本目录，因此远端路径不同时必须显式设置。 |
+
+原配方看门狗也必须设置 `QWEN38_MODEL_PATH`，重启远端 worker 时会显式传递该路径，
+以及已设置的 `QWEN38_SGLANG_SOURCE` / `QWEN38_MOE_CONFIG_DIR`；缺少模型路径时拒绝重启。
+
+HF 的 `config.json` 是模型配置。managed 另行生成 `deployment-settings.json`、
+`state/node-{rank}.json` 和 `state/fair-prefill-control.json`，分别保存源码/模型别名等
+部署设置、节点地址/角色/端口和 prefill 调度参数；不用从某个已有部署复制私人 config。
+具体生成位置见 [managed 配方](managed/README.md#准备独立源码与模型目录)。
+
+代码和文档中的 **ACK** 指 worker 运行时生成的 admission 确认，用来核对同一 worker
+的容量 credit；它不是用户授权记录，也不是云账号 AccessKey（AK），无需手工填写或粘贴。
+本配方本身不需要云平台 AccessKey。云端作业提交、镜像登录等凭据应留在自己的私有
+凭据管理环境；真实节点配置、运行日志、`.runtime/` 和密钥文件不要提交到 Git。
+
 ## 拓扑与端口
 
 | 角色 | 数量 | 监听地址 | 说明 |
 |---|---:|---|---|
-| Prefill worker | 4 | `<PREFILLn_IP>:41000`，bootstrap `8998` | 只做 prefill，KV 经 Mooncake 传 Decode |
-| Decode worker | 4 | `<DECODEn_IP>:42000` | 只做 decode，启用 NEXTN/MTP |
+| Prefill worker | 4 | `<P0_IP>`…`<P3_IP>:41000`，bootstrap `8998` | 只做 prefill，KV 经 Mooncake 传 Decode |
+| Decode worker | 4 | `<D0_IP>`…`<D3_IP>:42000` | 只做 decode，启用 NEXTN/MTP |
 | Router | 1 | `0.0.0.0:40000` | `--pd-disaggregation`，prefill 默认 `cache_aware`、decode `round_robin` |
 
-客户端只访问 Router：`http://<router-ip>:40000/v1/chat/completions`。
+客户端只访问 Router：`http://<ROUTER_IP>:40000/v1/chat/completions`。
 （Router 是纯 CPU 的 Rust 进程，可以放在任一节点上，也可以单独放一台机器。）
 
-## 使用镜像（已验证）
+## 使用镜像
+
+替换成自己的镜像地址；下列依赖版本来自原部署的已验证镜像，镜像地址不随配方提供。
 
 ```text
-dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sglang:sglang-0-5-18-qwen38-next-flash-h100-1m
+<REGISTRY>/<NAMESPACE>/<H100_IMAGE>:<TAG>
 ```
 
 镜像内容（实测 `importlib.metadata.version`）：CUDA 13.0 devel + **PyTorch 2.13.0+cu130** +
@@ -36,7 +69,7 @@ dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sgla
 **0.6.18** + `mooncake-transfer-engine-cuda13 0.3.12` + `sglang-router 0.3.2` +
 `transformers 5.12.1`。
 
-> ⚠️ **不要用 H200 那套 PD 镜像**（`...scimaster:sglang-0-5-18-cuda13-qwen38-next-pd`）：
+> ⚠️ **不要直接复用依赖版本不同的 H200 PD 镜像**：
 > 它的 flashinfer 是 0.6.17，而本配方在 Decode 上会落到 flashinfer 注意力后端，
 > 启动时会被 `flashinfer_python>=0.6.18` 断言拦住（原因见「attention backend」一节）。
 
@@ -49,25 +82,26 @@ dptech-sh-pai-acr-registry-vpc.cn-shanghai.cr.aliyuncs.com/dptech-namespace/sgla
 | GPU | 8 ×（8×H100 sm90），每实例单机 TP8 |
 | 内存 | 每台 ≥ 768 GB（prefill 开 HiCache ratio 1.5 后约用 620 GB） |
 | 镜像 | 见上方 H100 镜像，八台完全一致 |
-| 源码 | Qwen3.8 兼容 SGLang（默认 `/mnt/data/xinyuzhu/sglang`，**dev 分支**） |
+| 源码 | 自己的 Qwen3.8 兼容 SGLang 源码目录 `SOURCE`；managed 需满足 manifest 校验 |
 | 模型 | `qwen4_exp`、原生 `max_position_embeddings=262144`、带 `mtp.*`（NEXTN 需要） |
-| 挂载 | 八台都挂 `/mnt/data`（模型 + 源码） |
+| 挂载 | 八台以相同绝对路径挂载自己的共享根目录 `<SHARED_ROOT>`（模型 + 源码 + RUN） |
 | 网络 | 八台内网互通（可以跨 /24）；每台 8 张 RoCE v2 HCA（`mlx5_0..7`），可用 GID index = **3** |
 | 端口 | 41000 / 42000（worker）、8998（bootstrap）、40000（Router）需互相放通 |
 
-`/mnt/data/xinyuzhu/sglang` 这份源码树必须包含 Qwen4-Exp 的 PD 支持与 QSA 修复
-（`git -C <SOURCE> log --oneline -1` 应包含 upstream main 的 merge）。
+`SOURCE` 必须包含 Qwen4-Exp 的 PD 支持与 QSA 修复；managed 配方另按
+`managed/source-manifest.json` 校验对应源码文件，不能仅根据分支名判断兼容性。
 
-## 0. 快速开始（Agent 照抄这一段）
+## 0. 原配方快速开始（先替换占位符）
 
 ```bash
 # ---- 变量 ----
-export SOURCE=/mnt/data/xinyuzhu/sglang
-export DIR=$SOURCE/endless-frontier/qwen3.8-next-flash/h100_4p4d
-export QWEN38_MODEL_PATH=/mnt/data/yuzhucai/dlc_outputs/qwen38_flash_bio_0915_4ep/iter_0001285/hf
-export PREFILL1=<prefill-1 IP> PREFILL2=<prefill-2 IP> PREFILL3=<prefill-3 IP> PREFILL4=<prefill-4 IP>
-export DECODE1=<decode-1 IP>   DECODE2=<decode-2 IP>   DECODE3=<decode-3 IP>   DECODE4=<decode-4 IP>
-export ROUTER=<router 所在节点 IP>          # 建议放 decode-1
+export SOURCE='/path/to/sglang'
+export DIR="$SOURCE/endless-frontier/qwen3.8-next-flash/h100_4p4d"
+export QWEN38_SGLANG_SOURCE="$SOURCE"
+export QWEN38_MODEL_PATH='/path/to/model/hf'
+export PREFILL1='<P0_IP>' PREFILL2='<P1_IP>' PREFILL3='<P2_IP>' PREFILL4='<P3_IP>'
+export DECODE1='<D0_IP>' DECODE2='<D1_IP>' DECODE3='<D2_IP>' DECODE4='<D3_IP>'
+export ROUTER='<ROUTER_IP>'          # 建议放 D0（下文原配方称 decode-1）
 
 # ---- 1) 先只校验（每台各跑一次自己的角色；会把 config.json 检测/改写成 1M，秒级）----
 bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh prefill $PREFILL1 41000 8998 --check-only   # prefill-1
@@ -80,16 +114,16 @@ bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh decode  $DECODE3  42000 899
 bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh decode  $DECODE4  42000 8998 --check-only   # decode-4
 
 # ---- 2) 启动四台 Prefill（每台各自执行；可并行）----
-nohup setsid bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh prefill <本机IP> 41000 8998 \
+nohup setsid bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh prefill '<PREFILL_LOCAL_IP>' 41000 8998 \
     > /tmp/qwen38_prefill.log 2>&1 &
 # prefill 默认开 HiCache ratio 1.5（额外占 ~490GB host 内存/台；不需要就加 QWEN38_PD_HICACHE_RATIO=off）
 # 等 /health 200（冷启动约 5~6 分钟：336GB 权重 + CUDA graph）
-until [ "$(curl -s -o /dev/null -w '%{http_code}' http://<本机IP>:41000/health)" = 200 ]; do sleep 10; done
+until [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://<PREFILL_LOCAL_IP>:41000/health')" = 200 ]; do sleep 10; done
 
 # ---- 3) 启动四台 Decode（每台各自执行；建议等 Prefill 起来后再起，错开 NAS 读盘）----
-nohup setsid bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh decode <本机IP> 42000 8998 \
+nohup setsid bash $DIR/run_qwen38_flash_next_yarn_1m_pd_worker.sh decode '<DECODE_LOCAL_IP>' 42000 8998 \
     > /tmp/qwen38_decode.log 2>&1 &
-until [ "$(curl -s -o /dev/null -w '%{http_code}' http://<本机IP>:42000/health)" = 200 ]; do sleep 10; done
+until [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://<DECODE_LOCAL_IP>:42000/health')" = 200 ]; do sleep 10; done
 
 # ---- 4) Router（任一节点，建议 decode-1）----
 export QWEN38_PD_PREFILL_IPS=$PREFILL1,$PREFILL2,$PREFILL3,$PREFILL4
@@ -260,8 +294,13 @@ Subprocess scheduler_0 (pid=54464) crashed with exit code -6.
 ### 启动 / 停止 / 查看
 
 ```bash
-# 在 Router 那台机器上（默认 decode-2 / 10.0.1.127）
-cd /mnt/data/xinyuzhu/sglang/endless-frontier/qwen3.8-next-flash/h100_4p4d
+# 在自己选定的 Router 机器上；先设置快速开始中的 SOURCE / DIR / 节点变量。
+cd "$DIR"
+export QWEN38_WATCH_PREFILL_IPS="$PREFILL1,$PREFILL2,$PREFILL3,$PREFILL4"
+export QWEN38_WATCH_DECODE_IPS="$DECODE1,$DECODE2,$DECODE3,$DECODE4"
+export QWEN38_WATCH_SSH_KEY='/path/to/private-key'
+export QWEN38_WATCH_SSH_USER='<SSH_USER>'
+export QWEN38_WATCH_WORKER_DIR="$DIR"
 nohup setsid python3 watch_worker.py > /tmp/qwen38_watchdog.out 2>&1 &
 
 python3 watch_worker.py --status          # 看当前状态（JSON 摘要）
@@ -280,7 +319,10 @@ python3 test_watch_worker.py              # 离线单测（打桩，不碰真机
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `QWEN38_WATCH_PREFILL_IPS` / `_DECODE_IPS` | 本集群 4+4 个 IP | 逗号分隔的节点列表 |
+| `QWEN38_WATCH_PREFILL_IPS` / `_DECODE_IPS` | 必填 | 逗号分隔的节点列表 |
+| `QWEN38_WATCH_SSH_KEY` | 必填 | 自己已有 SSH 私钥的文件路径，不是私钥正文 |
+| `QWEN38_WATCH_SSH_USER` / `_SSH_PORT` | `root` / `22` | 自己的远端登录用户与 SSH 端口 |
+| `QWEN38_WATCH_WORKER_DIR` | 本机脚本目录 | 远端脚本目录；八台应使用相同绝对路径 |
 | `QWEN38_WATCH_INTERVAL` | 30 | 巡检间隔秒 |
 | `QWEN38_WATCH_FAIL_THRESHOLD` | 3 | 连续失败几次算故障 |
 | `QWEN38_WATCH_COOLDOWN` | **300** | 同一节点两次重启最小间隔（5 分钟） |
@@ -312,18 +354,19 @@ python3 test_watch_worker.py              # 离线单测（打桩，不碰真机
 - 「node-unreachable」只告警不重启（SSH 都不通，重启也无从谈起）。
 - 节点镜像是**没有 ssh 客户端**的（`/usr/bin/ssh` 不存在、apt 也装不了
   `openssh-client`），所以看门狗用 `paramiko`（已 `pip install`）直连内网
-  `10.0.x.x:22`。换镜像时记得带上 paramiko，否则看门狗会 `ModuleNotFoundError`。
+  `<WORKER_IP>:22`。换镜像时记得带上 paramiko，否则看门狗会 `ModuleNotFoundError`。
 
 ## 压测
 
 `bench_pd.py` 用模型自带 tokenizer 构造指定长度的输入，流式统计 TTFT / 端到端 /
-decode TPS（token 数取服务端 usage），默认 `ignore_eos=1` 强制生成到 `max_tokens`：
+decode TPS（token 数取服务端 usage），默认 `ignore_eos=1` 强制生成到 `max_tokens`。
+必须用 `--tokenizer` 或 `QWEN38_MODEL_PATH` 指定自己的 HF tokenizer 目录：
 
 ```bash
 python3 $DIR/bench_pd.py --input-tokens 300000 --output-tokens 10000 \
-    --url http://<router-ip>:40000 --salt s1 --label '300k/10k'
+    --url 'http://<ROUTER_IP>:40000' --salt s1 --label '300k/10k'
 python3 $DIR/bench_pd.py --input-tokens 800000 --output-tokens 10000 \
-    --url http://<router-ip>:40000 --salt s2 --label '800k/10k'
+    --url 'http://<ROUTER_IP>:40000' --salt s2 --label '800k/10k'
 ```
 
 `--salt` 会给 prompt 加盐：**不同 salt = 全新前缀（冷启动）**，**同一 salt 重发 =

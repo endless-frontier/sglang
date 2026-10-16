@@ -14,7 +14,7 @@
 
 为什么用 paramiko 而不是 ssh 命令：这些节点镜像里**没有 ssh 客户端**
 （`/usr/bin/ssh` 不存在，apt 也装不了 openssh-client），所以走 Python 的
-paramiko + 已有的 id_rsa 私钥，直连内网 `10.0.x.x:22`（已验证 0.1s 可连）。
+paramiko + QWEN38_WATCH_SSH_KEY 指定的已有私钥，直连内网 `<WORKER_IP>:22`。
 
 用法：
     python3 watch_worker.py --once --dry-run     # 单次巡检，只打印不重启
@@ -22,8 +22,9 @@ paramiko + 已有的 id_rsa 私钥，直连内网 `10.0.x.x:22`（已验证 0.1s
     python3 watch_worker.py                      # 常驻（默认 30s 一轮）
     nohup setsid python3 watch_worker.py > /tmp/qwen38_watchdog.out 2>&1 &
 
-常用环境变量（都有默认值，见下面 ENV 一节）：
+常用环境变量（节点与 SSH 私钥路径必填，其余见下面 ENV 一节）：
     QWEN38_WATCH_PREFILL_IPS / QWEN38_WATCH_DECODE_IPS   节点列表（必填）
+    QWEN38_WATCH_SSH_KEY             自己已有的 SSH 私钥文件路径（必填）
     QWEN38_WATCH_INTERVAL            巡检间隔秒，默认 30
     QWEN38_WATCH_FAIL_THRESHOLD      /health 连续失败几次判定僵死，默认 3
     QWEN38_WATCH_COOLDOWN            同一节点两次重启最小间隔秒，默认 300（5 分钟）
@@ -32,6 +33,7 @@ paramiko + 已有的 id_rsa 私钥，直连内网 `10.0.x.x:22`（已验证 0.1s
     QWEN38_WATCH_DRY_RUN=1           只判定不重启
     QWEN38_WATCH_MONITOR_ROUTER=0    不监控本机 Router
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,6 +47,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -56,21 +59,29 @@ def env(name, default):
     return default if value is None or value == "" else value
 
 
-PREFILL_IPS = env("QWEN38_WATCH_PREFILL_IPS", "<PREFILL1_IP>,<PREFILL2_IP>,<PREFILL3_IP>,<PREFILL4_IP>")
-DECODE_IPS = env("QWEN38_WATCH_DECODE_IPS", "<DECODE1_IP>,<DECODE2_IP>,<DECODE3_IP>,<DECODE4_IP>")
+PREFILL_IPS = env(
+    "QWEN38_WATCH_PREFILL_IPS",
+    "<PREFILL1_IP>,<PREFILL2_IP>,<PREFILL3_IP>,<PREFILL4_IP>",
+)
+DECODE_IPS = env(
+    "QWEN38_WATCH_DECODE_IPS", "<DECODE1_IP>,<DECODE2_IP>,<DECODE3_IP>,<DECODE4_IP>"
+)
 PREFILL_PORT = int(env("QWEN38_WATCH_PREFILL_PORT", "41000"))
 DECODE_PORT = int(env("QWEN38_WATCH_DECODE_PORT", "42000"))
 BOOTSTRAP_PORT = env("QWEN38_WATCH_BOOTSTRAP_PORT", "8998")
 ROUTER_PORT = int(env("QWEN38_WATCH_ROUTER_PORT", "40000"))
 
-SSH_KEY = env("QWEN38_WATCH_SSH_KEY", "/mnt/data/xinyuzhu/id_rsa")
+SSH_KEY = env("QWEN38_WATCH_SSH_KEY", "")
 SSH_USER = env("QWEN38_WATCH_SSH_USER", "root")
 SSH_PORT = int(env("QWEN38_WATCH_SSH_PORT", "22"))
 
-WORKER_DIR = env("QWEN38_WATCH_WORKER_DIR",
-                 "/mnt/data/xinyuzhu/sglang/endless-frontier/qwen3.8-next-flash/h100_4p4d")
-WORKER_SCRIPT = env("QWEN38_WATCH_WORKER_SCRIPT", "run_qwen38_flash_next_yarn_1m_pd_worker.sh")
-ROUTER_SCRIPT = env("QWEN38_WATCH_ROUTER_SCRIPT", "run_qwen38_flash_next_yarn_1m_pd_router.sh")
+WORKER_DIR = env("QWEN38_WATCH_WORKER_DIR", str(Path(__file__).resolve().parent))
+WORKER_SCRIPT = env(
+    "QWEN38_WATCH_WORKER_SCRIPT", "run_qwen38_flash_next_yarn_1m_pd_worker.sh"
+)
+ROUTER_SCRIPT = env(
+    "QWEN38_WATCH_ROUTER_SCRIPT", "run_qwen38_flash_next_yarn_1m_pd_router.sh"
+)
 
 INTERVAL = float(env("QWEN38_WATCH_INTERVAL", "30"))
 FAIL_THRESHOLD = int(env("QWEN38_WATCH_FAIL_THRESHOLD", "3"))
@@ -109,16 +120,26 @@ def log(msg, also_print=True):
 
 
 class Node:
-    __slots__ = ("name", "role", "ip", "port", "kind",
-                 "fail_count", "last_restart", "restarting_since", "restarts", "state",
-                 "first_fail_ts")
+    __slots__ = (
+        "name",
+        "role",
+        "ip",
+        "port",
+        "kind",
+        "fail_count",
+        "last_restart",
+        "restarting_since",
+        "restarts",
+        "state",
+        "first_fail_ts",
+    )
 
     def __init__(self, name, role, ip, port, kind="remote"):
         self.name = name
         self.role = role
         self.ip = ip
         self.port = port
-        self.kind = kind          # remote | local（router 在本机）
+        self.kind = kind  # remote | local（router 在本机）
         self.fail_count = 0
         self.last_restart = 0.0
         self.restarting_since = None
@@ -133,10 +154,18 @@ class Node:
 
     def as_dict(self):
         return {
-            "name": self.name, "role": self.role, "ip": self.ip, "port": self.port,
-            "state": self.state, "fail_count": self.fail_count, "restarts": self.restarts,
-            "last_restart": (datetime.fromtimestamp(self.last_restart).strftime("%Y-%m-%d %H:%M:%S")
-                             if self.last_restart else None),
+            "name": self.name,
+            "role": self.role,
+            "ip": self.ip,
+            "port": self.port,
+            "state": self.state,
+            "fail_count": self.fail_count,
+            "restarts": self.restarts,
+            "last_restart": (
+                datetime.fromtimestamp(self.last_restart).strftime("%Y-%m-%d %H:%M:%S")
+                if self.last_restart
+                else None
+            ),
         }
 
 
@@ -148,9 +177,10 @@ def build_nodes():
         raise SystemExit(
             "节点列表还是占位符 %s\n"
             "请设置 QWEN38_WATCH_PREFILL_IPS / QWEN38_WATCH_DECODE_IPS，例如：\n"
-            "  export QWEN38_WATCH_PREFILL_IPS=10.0.1.120,10.0.1.125,10.0.0.45,10.0.0.46\n"
-            "  export QWEN38_WATCH_DECODE_IPS=10.0.1.126,10.0.1.127,10.0.0.47,10.0.0.48"
-            % missing[0])
+            "  export QWEN38_WATCH_PREFILL_IPS='<P0_IP>,<P1_IP>,<P2_IP>,<P3_IP>'\n"
+            "  export QWEN38_WATCH_DECODE_IPS='<D0_IP>,<D1_IP>,<D2_IP>,<D3_IP>'"
+            % missing[0]
+        )
     nodes = []
     for idx, ip in enumerate(prefills, 1):
         nodes.append(Node("prefill-%d" % idx, "prefill", ip, PREFILL_PORT))
@@ -188,6 +218,10 @@ _KEY = None
 def get_key():
     global _KEY
     if _KEY is None:
+        if not SSH_KEY:
+            raise RuntimeError(
+                "Set QWEN38_WATCH_SSH_KEY to your existing SSH private-key file"
+            )
         import paramiko
 
         try:
@@ -204,9 +238,17 @@ def ssh_run(ip, script, timeout=120):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(ip, port=SSH_PORT, username=SSH_USER, pkey=get_key(),
-                       timeout=15, banner_timeout=30, auth_timeout=30,
-                       allow_agent=False, look_for_keys=False)
+        client.connect(
+            ip,
+            port=SSH_PORT,
+            username=SSH_USER,
+            pkey=get_key(),
+            timeout=15,
+            banner_timeout=30,
+            auth_timeout=30,
+            allow_agent=False,
+            look_for_keys=False,
+        )
         stdin, stdout, stderr = client.exec_command("bash -s", timeout=timeout)
         stdin.write(script)
         stdin.channel.shutdown_write()
@@ -264,10 +306,20 @@ def remote_last_work_epoch(ip, role):
         return None
 
 
-
-
 def restart_remote(node):
     """杀掉远端 worker 的整个进程组再重新拉起。返回 (ok, 说明)。"""
+    model_path = env("QWEN38_MODEL_PATH", "")
+    if not model_path:
+        return False, "Set QWEN38_MODEL_PATH before restarting remote workers"
+    # SSH 不会继承本机环境；只传递启动所需的模型/源码/MoE 路径。
+    worker_env = {"QWEN38_MODEL_PATH": model_path}
+    for name in ("QWEN38_SGLANG_SOURCE", "QWEN38_MOE_CONFIG_DIR"):
+        value = env(name, "")
+        if value:
+            worker_env[name] = value
+    worker_env_args = " ".join(
+        "%s=%s" % (name, shlex.quote(value)) for name, value in worker_env.items()
+    )
     script = r"""
 set -u
 python3 - <<'PY'
@@ -330,28 +382,35 @@ PY
 
 # 3) 拉起
 cd __WORKER_DIR__ || exit 3
-nohup setsid bash __WORKER_SCRIPT__ __ROLE__ __IP__ __PORT__ __BOOTSTRAP__ \
+nohup setsid env __WORKER_ENV__ bash __WORKER_SCRIPT__ __ROLE__ __IP__ __PORT__ __BOOTSTRAP__ \
     > /tmp/qwen38___ROLE__.log 2>&1 < /dev/null &
 sleep 12
 echo "--- 启动后进程数 ---"
 ps -eo pid,pgid,etime,args | grep -E '[s]glang\.launch_server' | head -1 | cut -c1-160
 """
-    script = (script
-              .replace("__WORKER_DIR__", shlex.quote(WORKER_DIR))
-              .replace("__WORKER_SCRIPT__", shlex.quote(WORKER_SCRIPT))
-              .replace("__ROLE__", node.role)
-              .replace("__IP__", node.ip)
-              .replace("__PORT__", str(node.port))
-              .replace("__BOOTSTRAP__", BOOTSTRAP_PORT))
+    script = (
+        script.replace("__WORKER_DIR__", shlex.quote(WORKER_DIR))
+        .replace("__WORKER_SCRIPT__", shlex.quote(WORKER_SCRIPT))
+        .replace("__ROLE__", node.role)
+        .replace("__IP__", node.ip)
+        .replace("__PORT__", str(node.port))
+        .replace("__BOOTSTRAP__", BOOTSTRAP_PORT)
+        .replace("__WORKER_ENV__", worker_env_args)
+    )
     rc, out, err = ssh_run(node.ip, script, timeout=300)
     tail = " | ".join(out.strip().splitlines()[-3:])
-    return rc == 0 and "sglang.launch_server" in out, "%s %s" % (tail, err.strip()[-200:])
+    return rc == 0 and "sglang.launch_server" in out, "%s %s" % (
+        tail,
+        err.strip()[-200:],
+    )
 
 
 def restart_router(node):
     """Router 跑在本机，直接本地重启（注意别把自己杀了）。"""
     me = os.getpid()
-    out = subprocess.run(["ps", "-eo", "pid,pgid,args"], capture_output=True, text=True).stdout
+    out = subprocess.run(
+        ["ps", "-eo", "pid,pgid,args"], capture_output=True, text=True
+    ).stdout
     killed = []
     for line in out.splitlines():
         parts = line.split(None, 2)
@@ -375,9 +434,15 @@ def restart_router(node):
     env.setdefault("QWEN38_PD_PREFILL_IPS", PREFILL_IPS)
     env.setdefault("QWEN38_PD_DECODE_IPS", DECODE_IPS)
     logf = open("/tmp/qwen38_router.log", "ab")
-    subprocess.Popen(["setsid", "bash", os.path.join(WORKER_DIR, ROUTER_SCRIPT)],
-                     cwd=WORKER_DIR, env=env, stdout=logf, stderr=logf,
-                     stdin=subprocess.DEVNULL, start_new_session=True)
+    subprocess.Popen(
+        ["setsid", "bash", os.path.join(WORKER_DIR, ROUTER_SCRIPT)],
+        cwd=WORKER_DIR,
+        env=env,
+        stdout=logf,
+        stderr=logf,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     time.sleep(10)
     ok, detail = http_health(node.url, timeout=HTTP_TIMEOUT)
     return ok, "killed=%s health=%s" % (killed, detail)
@@ -412,10 +477,16 @@ def check_node(node, nodes, dry_run):
     if node.state == "RESTARTING":
         waited = now - (node.restarting_since or now)
         if waited < STARTUP_TIMEOUT:
-            if int(waited) // 60 != int(waited - INTERVAL) // 60:   # 每分钟打一条
-                log("%-10s 重启中（已等 %.0fs / %ds，%s）" % (node.name, waited, STARTUP_TIMEOUT, detail))
+            if int(waited) // 60 != int(waited - INTERVAL) // 60:  # 每分钟打一条
+                log(
+                    "%-10s 重启中（已等 %.0fs / %ds，%s）"
+                    % (node.name, waited, STARTUP_TIMEOUT, detail)
+                )
             return
-        log("%-10s 启动窗口 %ds 内没起来，判定重启失败，转入重新判定" % (node.name, int(STARTUP_TIMEOUT)))
+        log(
+            "%-10s 启动窗口 %ds 内没起来，判定重启失败，转入重新判定"
+            % (node.name, int(STARTUP_TIMEOUT))
+        )
         node.state = "SUSPECT"
         node.fail_count = FAIL_THRESHOLD
         node.first_fail_ts = now - (MIN_SOFT_DURATION + 1)
@@ -429,13 +500,18 @@ def check_node(node, nodes, dry_run):
     hard = detail.startswith("http-")
     kind = "硬失败" if hard else "软失败(超时类)"
     if node.fail_count < FAIL_THRESHOLD:
-        log("%-10s 不健康（%s，%s），连续 %d/%d 次" % (node.name, detail, kind, node.fail_count, FAIL_THRESHOLD))
+        log(
+            "%-10s 不健康（%s，%s），连续 %d/%d 次"
+            % (node.name, detail, kind, node.fail_count, FAIL_THRESHOLD)
+        )
         return
 
     elapsed = now - (node.first_fail_ts or now)
     if not hard and elapsed < MIN_SOFT_DURATION:
-        log("%-10s 不健康（%s，%s）已 %.0fs < %ds → 继续观察（可能是忙，不是僵死）"
-            % (node.name, detail, kind, elapsed, int(MIN_SOFT_DURATION)))
+        log(
+            "%-10s 不健康（%s，%s）已 %.0fs < %ds → 继续观察（可能是忙，不是僵死）"
+            % (node.name, detail, kind, elapsed, int(MIN_SOFT_DURATION))
+        )
         return
 
     # 够阈值了，先分类故障
@@ -444,8 +520,10 @@ def check_node(node, nodes, dry_run):
     else:
         alive = remote_process_alive(node.ip)
         if alive is None:
-            log("%-10s 连续 %d 次不健康（%s），但 SSH 连不上 → 判为 node-unreachable，只告警不重启"
-                % (node.name, node.fail_count, detail))
+            log(
+                "%-10s 连续 %d 次不健康（%s），但 SSH 连不上 → 判为 node-unreachable，只告警不重启"
+                % (node.name, node.fail_count, detail)
+            )
             return
         if not alive:
             reason = "process-gone"
@@ -455,13 +533,18 @@ def check_node(node, nodes, dry_run):
             # 一次都没干过 → 真僵死（detokenizer 心跳停掉 / scheduler 卡死）。
             last_work = remote_last_work_epoch(node.ip, node.role)
             if last_work is None:
-                log("%-10s 进程在但读不到日志，无法确认是否僵死 → 本轮不重启（下一轮再看）" % node.name)
+                log(
+                    "%-10s 进程在但读不到日志，无法确认是否僵死 → 本轮不重启（下一轮再看）"
+                    % node.name
+                )
                 return
             # last_work 是整秒（日志只有秒级精度），first_fail_ts 是浮点，
             # 留 1s 容差，免得同一秒内判定被截断误差带偏。
             if last_work + 1 >= (node.first_fail_ts or now):
-                log("%-10s /health 不正常（%s）但首次失败后仍在干活（最后一批 %ds 前）→ 判定为「忙」而非僵死，不重启"
-                    % (node.name, detail, max(0, int(now - last_work))))
+                log(
+                    "%-10s /health 不正常（%s）但首次失败后仍在干活（最后一批 %ds 前）→ 判定为「忙」而非僵死，不重启"
+                    % (node.name, detail, max(0, int(now - last_work)))
+                )
                 node.state = "HEALTHY"
                 node.fail_count = 0
                 node.first_fail_ts = None
@@ -470,17 +553,24 @@ def check_node(node, nodes, dry_run):
 
     delta = now - node.last_restart
     if node.last_restart and delta < COOLDOWN:
-        log("%-10s %s，但距上次重启仅 %.0fs（冷却 %ds）→ 本轮跳过"
-            % (node.name, reason, delta, int(COOLDOWN)))
+        log(
+            "%-10s %s，但距上次重启仅 %.0fs（冷却 %ds）→ 本轮跳过"
+            % (node.name, reason, delta, int(COOLDOWN))
+        )
         return
 
     if restarting_count(nodes) >= MAX_CONCURRENT_RESTARTS:
-        log("%-10s %s，但已有 %d 个节点在重启中（上限 %d）→ 本轮跳过"
-            % (node.name, reason, restarting_count(nodes), MAX_CONCURRENT_RESTARTS))
+        log(
+            "%-10s %s，但已有 %d 个节点在重启中（上限 %d）→ 本轮跳过"
+            % (node.name, reason, restarting_count(nodes), MAX_CONCURRENT_RESTARTS)
+        )
         return
 
     if dry_run:
-        log("[dry-run] %-10s %s → 会重启（%s:%d）" % (node.name, reason, node.ip, node.port))
+        log(
+            "[dry-run] %-10s %s → 会重启（%s:%d）"
+            % (node.name, reason, node.ip, node.port)
+        )
         node.fail_count = 0
         node.first_fail_ts = None
         return
@@ -543,7 +633,11 @@ def main():
             raise SystemExit("读不到状态文件 %s：%s" % (STATUS_PATH, exc))
         return 0
 
-    dry_run = args.dry_run or env("QWEN38_WATCH_DRY_RUN", "0") not in ("0", "false", "no")
+    dry_run = args.dry_run or env("QWEN38_WATCH_DRY_RUN", "0") not in (
+        "0",
+        "false",
+        "no",
+    )
     nodes = build_nodes()
 
     # 单实例保护
@@ -553,16 +647,28 @@ def main():
                 with open(PID_PATH, encoding="utf-8") as fh:
                     old = int(fh.read().strip())
                 os.kill(old, 0)
-                raise SystemExit("已经有一个看门狗在跑（PID %d，%s）；先 kill 它再启动" % (old, PID_PATH))
+                raise SystemExit(
+                    "已经有一个看门狗在跑（PID %d，%s）；先 kill 它再启动"
+                    % (old, PID_PATH)
+                )
             except (ValueError, ProcessLookupError, PermissionError):
                 pass
         with open(PID_PATH, "w", encoding="utf-8") as fh:
             fh.write(str(os.getpid()))
 
-    log("看门狗启动：%d 个节点（%s）；间隔 %ds / 阈值 %d / 冷却 %ds / 启动窗口 %ds / 并发上限 %d%s"
-        % (len(nodes), ", ".join("%s=%s" % (n.name, n.ip) for n in nodes),
-           int(INTERVAL), FAIL_THRESHOLD, int(COOLDOWN), int(STARTUP_TIMEOUT),
-           MAX_CONCURRENT_RESTARTS, "；DRY-RUN" if dry_run else ""))
+    log(
+        "看门狗启动：%d 个节点（%s）；间隔 %ds / 阈值 %d / 冷却 %ds / 启动窗口 %ds / 并发上限 %d%s"
+        % (
+            len(nodes),
+            ", ".join("%s=%s" % (n.name, n.ip) for n in nodes),
+            int(INTERVAL),
+            FAIL_THRESHOLD,
+            int(COOLDOWN),
+            int(STARTUP_TIMEOUT),
+            MAX_CONCURRENT_RESTARTS,
+            "；DRY-RUN" if dry_run else "",
+        )
+    )
 
     started = time.time()
     try:

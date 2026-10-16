@@ -16,8 +16,8 @@ export RUST_LOG="${QWEN38_ROUTER_RUST_LOG:-info}"
 if [[ -z "${QWEN38_PD_PREFILL_IPS:-}" || -z "${QWEN38_PD_DECODE_IPS:-}" ]]; then
     cat >&2 <<'EOF'
 ERROR: 需要 8 个 worker 的内网 IP（4 prefill + 4 decode）。示例：
-  export QWEN38_PD_PREFILL_IPS=10.0.0.11,10.0.0.12,10.0.0.15,10.0.0.16   # prefill-1..4
-  export QWEN38_PD_DECODE_IPS=10.0.0.13,10.0.0.14,10.0.0.17,10.0.0.18     # decode-1..4
+  export QWEN38_PD_PREFILL_IPS='<P0_IP>,<P1_IP>,<P2_IP>,<P3_IP>'
+  export QWEN38_PD_DECODE_IPS='<D0_IP>,<D1_IP>,<D2_IP>,<D3_IP>'
   bash run_qwen38_flash_next_yarn_1m_pd_router.sh
 EOF
     exit 2

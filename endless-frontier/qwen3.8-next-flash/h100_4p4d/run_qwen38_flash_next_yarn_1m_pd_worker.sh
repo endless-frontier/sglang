@@ -21,7 +21,7 @@ set -Eeuo pipefail
 #   bash run_qwen38_flash_next_yarn_1m_pd_worker.sh prefill <PREFILL1_IP> 41000 8998 --check-only
 #
 # 关键点（踩坑记录见 ../DEPLOYMENT_PRACTICE.md）：
-#   * 源码树默认 /mnt/data/xinyuzhu/sglang（dev 分支，已 merge main：含 QSA gather clamp 修复）；
+#   * 源码树默认当前脚本所在仓库（需含 QSA gather clamp 修复）；
 #     用 QWEN38_SGLANG_SOURCE 指到自己的源码树；
 #   * config.json 就地检测：已是 1M（YaRN factor=4.0）-> 不动；不是 -> 备份 .native.bak 后原子改写；
 #   * NEXTN 只在 decode 开：QSA draft-prefill 在超长上下文有 CUDA 非法地址缺陷；
@@ -62,10 +62,10 @@ if [[ "${ROLE}" != "prefill" && "${ROLE}" != "decode" ]]; then
     exit 2
 fi
 
-# 本次交付模型：qwen38_flash_bio_0915_4ep iter_0001285（qwen4_exp，rope 原生 default
-# -> 首次启动会就地改写为 YaRN 1M，原生配置备份为 config.json.native.bak）
-MODEL_PATH="${QWEN38_MODEL_PATH:-/mnt/data/yuzhucai/dlc_outputs/qwen38_flash_bio_0915_4ep/iter_0001285/hf}"
-SGLANG_SOURCE="${QWEN38_SGLANG_SOURCE:-/mnt/data/xinyuzhu/sglang}"
+# 显式指定自己的 HF 导出；原配方可能就地改写 YaRN 配置，备份为 .native.bak。
+MODEL_PATH="${QWEN38_MODEL_PATH:?Set QWEN38_MODEL_PATH to your HF model export directory}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SGLANG_SOURCE="${QWEN38_SGLANG_SOURCE:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
 TP_SIZE="${QWEN38_TP_SIZE:-8}"
 CONTEXT_LENGTH="${QWEN38_CONTEXT_LENGTH:-1048576}"
 MEM_FRACTION_STATIC="${QWEN38_MEM_FRACTION_STATIC:-0.93}"
@@ -262,7 +262,10 @@ export SGLANG_HEALTH_CHECK_TIMEOUT="${QWEN38_PD_HEALTH_CHECK_TIMEOUT:-300}"
 export MC_GID_INDEX="${QWEN38_MC_GID_INDEX:-3}"          # RoCE v2 IPv4 GID（mlx5_i 的 eth_i）
 export MC_TCP_ENABLE_CONNECTION_POOL="${QWEN38_MC_TCP_ENABLE_CONNECTION_POOL:-true}"
 export MC_MS_AUTO_DISC="${QWEN38_MC_MS_AUTO_DISC:-1}"
-[[ -d /mnt/data/xinyu/moe_configs ]] && export SGLANG_MOE_CONFIG_DIR="${QWEN38_MOE_CONFIG_DIR:-/mnt/data/xinyu/moe_configs}"
+if [[ -n "${QWEN38_MOE_CONFIG_DIR:-}" ]]; then
+    [[ -d "${QWEN38_MOE_CONFIG_DIR}" ]] || die "MoE 配置目录不存在：${QWEN38_MOE_CONFIG_DIR}"
+    export SGLANG_MOE_CONFIG_DIR="${QWEN38_MOE_CONFIG_DIR}"
+fi
 export SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT="${QWEN38_PD_BOOTSTRAP_TIMEOUT:-1800}"
 export SGLANG_DISAGGREGATION_WAITING_TIMEOUT="${QWEN38_PD_WAITING_TIMEOUT:-1800}"
 export SGLANG_DISAGGREGATION_THREAD_POOL_SIZE="${QWEN38_PD_THREAD_POOL_SIZE:-12}"
